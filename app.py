@@ -33,18 +33,17 @@ st.header("3. Subir Tesis")
 uploaded_file = st.file_uploader("Selecciona el PDF de la tesis", type="pdf")
 
 st.header("4. Rúbricas a Evaluar")
-rubricas_disponibles = [
-    "Cumplimiento de Normativa",
-    "Pertinencia Institucional",
-    "Perfil del Egresado",
-    "Respuesta a Necesidades del Planeta (ODS)",
-    "Respuesta a Necesidades del País (PEDN)",
-    "Ajuste Epistemológico del Proyecto",
-    "Formulación del Problema",
-    "Justificaciones",
-    "Hipótesis de Investigación",
-    "Pregunta de Investigación" # Limitado aquí por concepto, agregar las 19
-]
+# Cargar la base de datos de matrices (compilada desde main.tex)
+db_path = os.path.join(os.path.dirname(__file__), "rubricas_extraidas.json")
+if os.path.exists(db_path):
+    with open(db_path, "r", encoding="utf-8") as f:
+        rubricas_db = json.load(f)
+else:
+    st.error("⚠️ Error Crítico: No se encontró 'rubricas_extraidas.json'. El parseador no se ejecutó.")
+    st.stop()
+
+rubricas_disponibles = list(rubricas_db.keys())
+
 selected_rubrics = st.multiselect("Selecciona las secciones inalterables de LaTeX", rubricas_disponibles, default=rubricas_disponibles[:2])
 
 # Inicializar cliente de Gemini usando la variable de entorno que inyectará Streamlit Cloud
@@ -65,11 +64,18 @@ def extract_chunks(file_bytes, chunk_size=15):
             chunk_text = ""
     return chunks
 
-def map_phase(client, chunk_text, rubric, rigor):
+def map_phase(client, chunk_text, rubric_title, rubric_content, rigor):
     from google.genai import types
     prompt = f"""
-    Actúa como evaluador experto de tesis. Rúbrica: {rubric}. Nivel de rigor: {rigor}.
-    REGLA OBLIGATORIA: Si hallas un error, extrae la cita EXACTA enmarcada en comillas ("...").
+    Actúa como evaluador experto de tesis.
+    Dimensión a evaluar: {rubric_title}
+    
+    Nivel de rigor: {rigor}.
+    
+    CRITERIOS INALTERABLES (Matriz LaTeX original):
+    {rubric_content}
+    
+    REGLA OBLIGATORIA: Si hallas un error acorde a la matriz, extrae la cita EXACTA enmarcada en comillas ("...").
     Si parafraseas fallarás. Si no hay evidencia, devuelve vacío [].
     Retorna JSON puro con un arreglo de objetos: [{{"error_description": "...", "exact_quote": "..."}}].
     
@@ -94,13 +100,18 @@ def map_phase(client, chunk_text, rubric, rigor):
     st.write(f"⚠️ Error en Map (Ningún modelo Flash funcionó): {error_msg}")
     return []
 
-def reduce_phase(client, rubric, map_results, rigor):
+def reduce_phase(client, rubric_title, rubric_content, map_results, rigor):
     from google.genai import types
     evidences = json.dumps(map_results)
     prompt = f"""
-    Eres Gemini Pro. Rúbrica: {rubric}. Rigor: {rigor}.
-    Evidencias de la tesis: {evidences}.
-    1. Delimita únicamente los 3 peores errores.
+    Eres Gemini Pro. Rigor: {rigor}.
+    Dimensión a evaluar: {rubric_title}
+    
+    CRITERIOS INALTERABLES (Matriz LaTeX original):
+    {rubric_content}
+    
+    Evidencias extraídas de la tesis: {evidences}.
+    1. Delimita únicamente los 3 peores errores basándote ESTRICTAMENTE en la matriz LaTeX provista.
     2. Mantén las citas literales ("...") invariables.
     3. Redacta un sustento teórico APA (4-6 líneas).
     4. Asigna un puntaje (número entero).
@@ -148,16 +159,17 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
     total_steps = len(selected_rubrics)
     
     for idx, rubric in enumerate(selected_rubrics):
+        rubrica_texto_latex = rubricas_db[rubric]
         status_text.text(f"Fase MAP [Gemini Flash]: Filtrando evidencias para '{rubric}' a lo largo del documento...")
         
         all_candidates = []
         for chunk in chunks:
-            candidates = map_phase(client, chunk, rubric, rigor_val)
+            candidates = map_phase(client, chunk, rubric, rubrica_texto_latex, rigor_val)
             if candidates:
                 all_candidates.extend(candidates)
                 
         status_text.text(f"Fase REDUCE [Gemini Pro]: Consolidando evaluación rigurosa para '{rubric}'...")
-        rubric_result = reduce_phase(client, rubric, all_candidates, rigor_val)
+        rubric_result = reduce_phase(client, rubric, rubrica_texto_latex, all_candidates, rigor_val)
         
         informe_final.append({
             "rubrica": rubric,
