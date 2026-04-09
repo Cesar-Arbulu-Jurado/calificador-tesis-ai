@@ -76,16 +76,23 @@ def map_phase(client, chunk_text, rubric, rigor):
     Texto:
     {chunk_text}
     """
-    try:
-        res = client.models.generate_content(
-            model='gemini-1.5-flash', 
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        return json.loads(res.text) if res.text else []
-    except Exception as e:
-        st.write(f"⚠️ Error en Map: {str(e)}")
-        return []
+    
+    modelos_map = ['gemini-2.5-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash-002', 'gemini-flash']
+    error_msg = ""
+    for m in modelos_map:
+        try:
+            res = client.models.generate_content(
+                model=m, 
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            return json.loads(res.text) if res.text else []
+        except Exception as e:
+            error_msg = str(e)
+            continue
+            
+    st.write(f"⚠️ Error en Map (Ningún modelo Flash funcionó): {error_msg}")
+    return []
 
 def reduce_phase(client, rubric, map_results, rigor):
     from google.genai import types
@@ -104,15 +111,22 @@ def reduce_phase(client, rubric, map_results, rigor):
       "puntaje": 0
     }}
     """
-    try:
-        res = client.models.generate_content(
-            model='gemini-1.5-pro', 
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        return json.loads(res.text)
-    except Exception as e:
-        return {"top_3_errores": [], "sustento_teorico": f"Error técnico de API: {str(e)}", "puntaje": 0}
+    
+    modelos_reduce = ['gemini-2.5-pro', 'gemini-1.5-pro-latest', 'gemini-1.5-pro-002', 'gemini-pro']
+    error_msg = ""
+    for m in modelos_reduce:
+        try:
+            res = client.models.generate_content(
+                model=m, 
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            return json.loads(res.text)
+        except Exception as e:
+            error_msg = str(e)
+            continue
+            
+    return {"top_3_errores": [], "sustento_teorico": f"Error técnico de API crítico (Model Not Found): {error_msg}", "puntaje": 0}
 
 if st.button("Iniciar Evaluación Completa", type="primary"):
     if not uploaded_file or not evaluator_name or not selected_rubrics:
