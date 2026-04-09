@@ -66,23 +66,29 @@ def extract_chunks(file_bytes, chunk_size=15):
     return chunks
 
 def map_phase(client, chunk_text, rubric, rigor):
+    from google.genai import types
     prompt = f"""
     Actúa como evaluador experto de tesis. Rúbrica: {rubric}. Nivel de rigor: {rigor}.
     REGLA OBLIGATORIA: Si hallas un error, extrae la cita EXACTA enmarcada en comillas ("...").
     Si parafraseas fallarás. Si no hay evidencia, devuelve vacío [].
-    Retorna JSON con [{{ "error_description": "...", "exact_quote": "..." }}].
+    Retorna JSON puro con un arreglo de objetos: [{{"error_description": "...", "exact_quote": "..."}}].
     
     Texto:
     {chunk_text}
     """
     try:
-        res = client.models.generate_content(model='gemini-1.5-flash', contents=prompt)
-        text = res.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text) if text else []
+        res = client.models.generate_content(
+            model='gemini-1.5-flash', 
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        return json.loads(res.text) if res.text else []
     except Exception as e:
+        st.write(f"⚠️ Error en Map: {str(e)}")
         return []
 
 def reduce_phase(client, rubric, map_results, rigor):
+    from google.genai import types
     evidences = json.dumps(map_results)
     prompt = f"""
     Eres Gemini Pro. Rúbrica: {rubric}. Rigor: {rigor}.
@@ -90,15 +96,23 @@ def reduce_phase(client, rubric, map_results, rigor):
     1. Delimita únicamente los 3 peores errores.
     2. Mantén las citas literales ("...") invariables.
     3. Redacta un sustento teórico APA (4-6 líneas).
-    4. Asigna un puntaje.
-    Devuelve JSON con claves: "top_3_errores", "sustento_teorico", "puntaje".
+    4. Asigna un puntaje (número entero).
+    Devuelve EXACTAMENTE UN JSON PURO con las siguientes claves y tipos de dato:
+    {{
+      "top_3_errores": [{{"error_description": "...", "exact_quote": "..."}}],
+      "sustento_teorico": "...",
+      "puntaje": 0
+    }}
     """
     try:
-        res = client.models.generate_content(model='gemini-1.5-pro', contents=prompt)
-        text = res.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
+        res = client.models.generate_content(
+            model='gemini-1.5-pro', 
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        return json.loads(res.text)
     except Exception as e:
-        return {"top_3_errores": [], "sustento_teorico": "Error procesando validación.", "puntaje": 0}
+        return {"top_3_errores": [], "sustento_teorico": f"Error técnico de API: {str(e)}", "puntaje": 0}
 
 if st.button("Iniciar Evaluación Completa", type="primary"):
     if not uploaded_file or not evaluator_name or not selected_rubrics:
