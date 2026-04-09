@@ -77,7 +77,7 @@ def map_phase(client, chunk_text, rubric, rigor):
     {chunk_text}
     """
     
-    modelos_map = ['gemini-2.5-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash-002', 'gemini-flash']
+    modelos_map = ['gemini-3-flash-preview', 'gemini-3-flash', 'gemini-2.5-flash', 'gemini-1.5-flash-latest', 'gemini-flash']
     error_msg = ""
     for m in modelos_map:
         try:
@@ -112,7 +112,7 @@ def reduce_phase(client, rubric, map_results, rigor):
     }}
     """
     
-    modelos_reduce = ['gemini-2.5-pro', 'gemini-1.5-pro-latest', 'gemini-1.5-pro-002', 'gemini-pro']
+    modelos_reduce = ['gemini-3-pro-preview', 'gemini-3-pro', 'gemini-2.5-pro', 'gemini-1.5-pro-latest', 'gemini-pro']
     error_msg = ""
     for m in modelos_reduce:
         try:
