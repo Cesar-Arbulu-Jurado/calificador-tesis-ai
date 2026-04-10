@@ -225,6 +225,13 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
     def escape_latex(text):
         if not text:
             return ""
+        
+        import unicodedata
+        # Normaliza variables matemáticas tipo U+1D45A a una mísera letra 'm' compatible con LaTeX
+        text = unicodedata.normalize('NFKC', text)
+        # Fuerza cambio manual del signo negativo matemático a guion normal
+        text = text.replace('\u2212', '-')
+
         # Separar por comando enquote considerando coincidencias no codiciosas
         parts = re.split(r'(\\enquote\{.*?\})', text)
         escaped_parts = []
