@@ -117,20 +117,23 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor, max_e
     {rubric_content}
     
     Evidencias extraídas de la tesis: {evidences}.
-    1. Ejecuta un 'Deep Research' (cadena de pensamiento profundo) obligatorio rastreando en tu memoria las mejores fuentes de Ingeniería Civil para esta dimensión. Escribe tu análisis en la variable JSON.
-    2. Delimita únicamente los {max_errores} peores errores basándote ESTRICTAMENTE en la matriz LaTeX provista.
-    3. Mantén las citas literales ("...") invariables.
-    4. Redacta un sustento teórico APA (4-6 líneas) aplicando rigor epistemológico profundo:
-       -> PROHIBIDO citar o respaldarse en "Hernández Sampieri" y cualquier otro teórico de las ciencias sociales, investigación social o psicología.
-       -> OBLIGATORIO usar exclusivamente literatura científica anglosajona moderna en INGENIERÍA CIVIL y ciencias aplicadas exactas. Uso de autores en español solo si es absolutamente inevitable.
-       -> OBLIGATORIO: Debes insertar explícitamente las citas parentéticas (Autor, Año) dentro de la redacción de este párrafo. Todo autor que pongas en el arreglo "referencias_apa" DEBE estar citado aquí.
+    1. Ejecuta un 'Deep Research' (cadena de pensamiento profundo) obligatorio rastreando en tu memoria las mejores fuentes de Ingeniería Civil. Escribe tu análisis en la variable respectiva JSON.
+    2. Identifica hasta {max_errores} observaciones basándote ESTRICTAMENTE en la matriz LaTeX provista y para CADA observación, redacta UN (1) solo párrafo narrativo continuo (4-6 líneas) en español latinoamericano, en tercera persona académica.
+    3. La estructura obligatoria de cada párrafo DEBE integrar fluida y orgánicamente estas partes:
+       (a) Sustento teórico incrustado con citas parentéticas (Autor, Año). PROHIBIDO usar "Hernández Sampieri" o ciencias sociales; evalúa con óptica pura de ingeniería civil anglosajona.
+       (b) Desarrollo de la observación conectando la teoría con el fallo (Usa conectores fluidos, por ejemplo: "...en este sentido, la tesis falla al..."). No uses listas, ni subtítulos, ni la palabra "Observación" suelta.
+       (c) Cita literal extraída de la tesis documentada en Evidencias, insertada obligatoriamente usando el comando LaTeX \\enquote{{...}} y señalando brevemente su ubicación. (Ejemplo: ...tal como se aprecia en el capítulo X, que a la letra indica: \\enquote{{El estudio aborda...}}).
+    4. TODO AUTOR citado debe registrarse íntegro en tu matriz de "referencias_apa".
     5. Asigna un puntaje (número entero).
-    Devuelve EXACTAMENTE UN JSON PURO con las siguientes claves y tipos de dato:
+    
+    Devuelve EXACTAMENTE UN JSON PURO con las siguientes claves (no uses errores_hallados):
     {{
-      "deep_research_analysis": "Ejecuta aquí tu razonamiento interno y Deep Research sobre qué literatura civil usar...",
-      "errores_hallados": [{{"error_description": "...", "exact_quote": "..."}}],
-      "sustento_teorico": "...",
-      "referencias_apa": ["Referencia 1 estilo APA del autor usado en sustento", "Referencia 2..."],
+      "deep_research_analysis": "Ejecuta aquí tu razonamiento interno y Deep Research...",
+      "observaciones_narrativas": [
+        "Párrafo narrativo continuo de 4-6 líneas que contenga sustento (Smith, 2020), la observación y termine con la cita en código \\enquote{{texto literal}} evidenciado en el documento.",
+        "Párrafo 2..."
+      ],
+      "referencias_apa": ["Smith, A. (2020). Engineering...", "Referencia 2..."],
       "puntaje": 0
     }}
     """
@@ -155,7 +158,7 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor, max_e
             error_msg = str(e)
             continue
             
-    return {"errores_hallados": [], "referencias_apa": [], "sustento_teorico": f"Error técnico de API crítico (Model Not Found o Bad JSON): {error_msg}", "puntaje": 0}
+    return {"observaciones_narrativas": [f"Error técnico de API crítico (Model Not Found o Bad JSON): {error_msg}"], "referencias_apa": [], "puntaje": 0}
 
 if st.button("Iniciar Evaluación Completa", type="primary"):
     if not uploaded_file or not evaluator_name or not selected_rubrics or not correo_destino:
@@ -206,9 +209,9 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
     for item in informe_final:
         res = item['resultado']
         st.subheader(f"📌 {item['rubrica']} - Puntaje: {res.get('puntaje', 0)}")
-        st.write(f"**Sustento Teórico (APA):** {res.get('sustento_teorico')}")
-        for err in res.get('errores_hallados', []):
-            st.error(f"**Observación:** {err.get('error_description')}\n\n**Evidencia Literal:** {err.get('exact_quote')}")
+        for obs in res.get('observaciones_narrativas', []):
+            ui_text = re.sub(r'\\enquote\{(.*?)\}', r'«\1»', obs)
+            st.error(ui_text)
         total_score += int(res.get('puntaje', 0))
         st.divider()
         
@@ -222,19 +225,30 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
     def escape_latex(text):
         if not text:
             return ""
-        # Especiales de LaTeX
+        # Separar por comando enquote considerando coincidencias no codiciosas
+        parts = re.split(r'(\\enquote\{.*?\})', text)
+        escaped_parts = []
         chars = {
             '&': r'\&', '%': r'\%', '$': r'\$', '#': r'\#', '_': r'\_',
             '{': r'\{', '}': r'\}', '~': r'\textasciitilde{}', '^': r'\textasciicircum{}', '\\': r'\textbackslash{}'
         }
-        escaped = "".join([chars.get(c, c) for c in text])
-        return escaped
+        for p in parts:
+            if p.startswith(r'\enquote{') and p.endswith('}'):
+                # Si es un enquote, la macro externa \enquote{} se mantiene.
+                # Lo de adentro se escapa.
+                inner_text = p[9:-1]
+                inner_esc = "".join([chars.get(c, c) for c in inner_text])
+                escaped_parts.append(rf"\enquote{{{inner_esc}}}")
+            else:
+                escaped_parts.append("".join([chars.get(c, c) for c in p]))
+        return "".join(escaped_parts)
 
     # Generación de la Plantilla LaTeX
     latex_content = r"\documentclass[12pt,a4paper]{article}" + "\n"
     latex_content += r"\usepackage[utf8]{inputenc}" + "\n"
     latex_content += r"\usepackage[T1]{fontenc}" + "\n"
     latex_content += r"\usepackage[spanish]{babel}" + "\n"
+    latex_content += r"\usepackage[spanish]{csquotes}" + "\n"
     latex_content += r"\usepackage{geometry}" + "\n"
     latex_content += r"\usepackage{xcolor}" + "\n"
     latex_content += r"\geometry{margin=2.5cm}" + "\n"
@@ -251,19 +265,15 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
     for item in informe_final:
         res = item['resultado']
         rubrica_esc = escape_latex(item['rubrica'])
-        sustento_esc = escape_latex(res.get('sustento_teorico', ''))
         puntaje = res.get('puntaje', 0)
         
         latex_content += rf"\subsection*{{{rubrica_esc} (Puntaje Asignado: {puntaje})}}" + "\n"
-        latex_content += rf"\textbf{{Sustento Teórico (APA):}} {sustento_esc} \vspace{{0.3cm}} \\" + "\n"
         
-        errores = res.get('errores_hallados', [])
-        if errores:
+        observaciones = res.get('observaciones_narrativas', [])
+        if observaciones:
             latex_content += r"\begin{itemize}" + "\n"
-            for err in errores:
-                desc_esc = escape_latex(err.get('error_description', ''))
-                quote_esc = escape_latex(err.get('exact_quote', ''))
-                latex_content += rf"  \item \textbf{{Observación:}} {desc_esc} \\ \textit{{Evidencia Cruda:}} ``{quote_esc}''" + "\n"
+            for obs in observaciones:
+                latex_content += rf"  \item {escape_latex(obs)}" + "\n"
             latex_content += r"\end{itemize}" + "\n"
         
         referencias_bloque = res.get('referencias_apa', [])
