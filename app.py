@@ -123,6 +123,7 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor, max_e
     4. Redacta un sustento teórico APA (4-6 líneas) aplicando rigor epistemológico profundo:
        -> PROHIBIDO citar o respaldarse en "Hernández Sampieri" y cualquier otro teórico de las ciencias sociales, investigación social o psicología.
        -> OBLIGATORIO usar exclusivamente literatura científica anglosajona moderna en INGENIERÍA CIVIL y ciencias aplicadas exactas. Uso de autores en español solo si es absolutamente inevitable.
+       -> OBLIGATORIO: Debes insertar explícitamente las citas parentéticas (Autor, Año) dentro de la redacción de este párrafo. Todo autor que pongas en el arreglo "referencias_apa" DEBE estar citado aquí.
     5. Asigna un puntaje (número entero).
     Devuelve EXACTAMENTE UN JSON PURO con las siguientes claves y tipos de dato:
     {{
