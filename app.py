@@ -268,7 +268,11 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
         subprocess.run(["pdflatex", "-interaction=nonstopmode", "-output-directory=reportes_temp", tex_path], check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
         compilado_ok = False
-        st.error("Error al compilar el PDF de LaTeX en la nube. Revisa los log de consola. Detalles: " + str(e.stderr.decode('utf-8', errors='ignore')))
+        stderr_log = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ""
+        stdout_log = e.stdout.decode('utf-8', errors='ignore') if e.stdout else ""
+        # Extraer las últimas líneas de error para no saturar la pantalla
+        full_log = (stdout_log + "\n" + stderr_log)[-2000:]
+        st.error("Error crítico de sintaxis en LaTeX:\n\n```text\n" + full_log + "\n```")
 
     if compilado_ok and os.path.exists(pdf_path):
         with open(pdf_path, "rb") as pdf_file:
