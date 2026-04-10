@@ -117,14 +117,19 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor, max_e
     {rubric_content}
     
     Evidencias extraídas de la tesis: {evidences}.
-    1. Delimita únicamente los {max_errores} peores errores basándote ESTRICTAMENTE en la matriz LaTeX provista.
-    2. Mantén las citas literales ("...") invariables.
-    3. Redacta un sustento teórico APA (4-6 líneas).
-    4. Asigna un puntaje (número entero).
+    1. Ejecuta un 'Deep Research' (cadena de pensamiento profundo) obligatorio rastreando en tu memoria las mejores fuentes de Ingeniería Civil para esta dimensión. Escribe tu análisis en la variable JSON.
+    2. Delimita únicamente los {max_errores} peores errores basándote ESTRICTAMENTE en la matriz LaTeX provista.
+    3. Mantén las citas literales ("...") invariables.
+    4. Redacta un sustento teórico APA (4-6 líneas) aplicando rigor epistemológico profundo:
+       -> PROHIBIDO citar o respaldarse en "Hernández Sampieri" y cualquier otro teórico de las ciencias sociales, investigación social o psicología.
+       -> OBLIGATORIO usar exclusivamente literatura científica anglosajona moderna en INGENIERÍA CIVIL y ciencias aplicadas exactas. Uso de autores en español solo si es absolutamente inevitable.
+    5. Asigna un puntaje (número entero).
     Devuelve EXACTAMENTE UN JSON PURO con las siguientes claves y tipos de dato:
     {{
+      "deep_research_analysis": "Ejecuta aquí tu razonamiento interno y Deep Research sobre qué literatura civil usar...",
       "errores_hallados": [{{"error_description": "...", "exact_quote": "..."}}],
       "sustento_teorico": "...",
+      "referencias_apa": ["Referencia 1 estilo APA del autor usado en sustento", "Referencia 2..."],
       "puntaje": 0
     }}
     """
@@ -143,7 +148,7 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor, max_e
             error_msg = str(e)
             continue
             
-    return {"errores_hallados": [], "sustento_teorico": f"Error técnico de API crítico (Model Not Found): {error_msg}", "puntaje": 0}
+    return {"errores_hallados": [], "referencias_apa": [], "sustento_teorico": f"Error técnico de API crítico (Model Not Found): {error_msg}", "puntaje": 0}
 
 if st.button("Iniciar Evaluación Completa", type="primary"):
     if not uploaded_file or not evaluator_name or not selected_rubrics or not correo_destino:
@@ -157,6 +162,7 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
     chunks = extract_chunks(file_bytes, chunk_size=15)
     
     informe_final = []
+    todas_las_referencias = []
     
     # Barra de progreso principal
     progress_bar = st.progress(0)
@@ -252,7 +258,21 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
                 quote_esc = escape_latex(err.get('exact_quote', ''))
                 latex_content += rf"  \item \textbf{{Observación:}} {desc_esc} \\ \textit{{Evidencia Cruda:}} ``{quote_esc}''" + "\n"
             latex_content += r"\end{itemize}" + "\n"
+        
+        referencias_bloque = res.get('referencias_apa', [])
+        todas_las_referencias.extend(referencias_bloque)
+        
         latex_content += r"\vspace{0.5cm}" + "\n\n"
+
+    if todas_las_referencias:
+        latex_content += r"\newpage" + "\n"
+        latex_content += r"\section*{Referencias Bibliográficas Consolidadas}" + "\n"
+        latex_content += r"\begin{itemize}" + "\n"
+        # Limpieza de duplicados y orden
+        referencias_unicas = sorted(list(set(todas_las_referencias)))
+        for r in referencias_unicas:
+            latex_content += rf"  \item {escape_latex(r)}" + "\n"
+        latex_content += r"\end{itemize}" + "\n\n"
 
     latex_content += r"\vfill\hrule\vspace{0.2cm}\begin{center}" + "\n"
     latex_content += rf"\textbf{{PUNTAJE GLOBAL OBTENIDO: {total_score}}}" + "\n"
