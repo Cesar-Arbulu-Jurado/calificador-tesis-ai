@@ -144,12 +144,18 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor, max_e
                 contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
-            return json.loads(res.text)
+            parsed = json.loads(res.text)
+            if not isinstance(parsed, dict):
+                if isinstance(parsed, list) and len(parsed) > 0 and isinstance(parsed[0], dict):
+                    return parsed[0]
+                else:
+                    raise Exception(f"El JSON devuelto no es un diccionario: {str(parsed)[0:100]}")
+            return parsed
         except Exception as e:
             error_msg = str(e)
             continue
             
-    return {"errores_hallados": [], "referencias_apa": [], "sustento_teorico": f"Error técnico de API crítico (Model Not Found): {error_msg}", "puntaje": 0}
+    return {"errores_hallados": [], "referencias_apa": [], "sustento_teorico": f"Error técnico de API crítico (Model Not Found o Bad JSON): {error_msg}", "puntaje": 0}
 
 if st.button("Iniciar Evaluación Completa", type="primary"):
     if not uploaded_file or not evaluator_name or not selected_rubrics or not correo_destino:
