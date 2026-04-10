@@ -24,6 +24,8 @@ with st.sidebar:
     correo_destino = st.text_input("Correo electrónico del evaluado (Destino del PDF)")
     
     st.header("2. Nivel de Rigurosidad")
+    max_observaciones = st.number_input("Número de Revisiones Deseadas por Criterio", min_value=2, max_value=10, value=3)
+    
     rigor_level = st.radio("Selecciona el rigor:", [
         "1 - Básico (Tolerante)", 
         "2 - Intermedio (Estándar)", 
@@ -104,7 +106,7 @@ def map_phase(client, chunk_text, rubric_title, rubric_content, rigor):
     st.write(f"⚠️ Error en Map (Ningún modelo Flash funcionó): {error_msg}")
     return []
 
-def reduce_phase(client, rubric_title, rubric_content, map_results, rigor):
+def reduce_phase(client, rubric_title, rubric_content, map_results, rigor, max_errores):
     from google.genai import types
     evidences = json.dumps(map_results)
     prompt = f"""
@@ -115,13 +117,13 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor):
     {rubric_content}
     
     Evidencias extraídas de la tesis: {evidences}.
-    1. Delimita únicamente los 3 peores errores basándote ESTRICTAMENTE en la matriz LaTeX provista.
+    1. Delimita únicamente los {max_errores} peores errores basándote ESTRICTAMENTE en la matriz LaTeX provista.
     2. Mantén las citas literales ("...") invariables.
     3. Redacta un sustento teórico APA (4-6 líneas).
     4. Asigna un puntaje (número entero).
     Devuelve EXACTAMENTE UN JSON PURO con las siguientes claves y tipos de dato:
     {{
-      "top_3_errores": [{{"error_description": "...", "exact_quote": "..."}}],
+      "errores_hallados": [{{"error_description": "...", "exact_quote": "..."}}],
       "sustento_teorico": "...",
       "puntaje": 0
     }}
@@ -141,7 +143,7 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor):
             error_msg = str(e)
             continue
             
-    return {"top_3_errores": [], "sustento_teorico": f"Error técnico de API crítico (Model Not Found): {error_msg}", "puntaje": 0}
+    return {"errores_hallados": [], "sustento_teorico": f"Error técnico de API crítico (Model Not Found): {error_msg}", "puntaje": 0}
 
 if st.button("Iniciar Evaluación Completa", type="primary"):
     if not uploaded_file or not evaluator_name or not selected_rubrics or not correo_destino:
@@ -173,7 +175,7 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
                 all_candidates.extend(candidates)
                 
         status_text.text(f"Fase REDUCE [Gemini Pro]: Consolidando evaluación rigurosa para '{rubric}'...")
-        rubric_result = reduce_phase(client, rubric, rubrica_texto_latex, all_candidates, rigor_val)
+        rubric_result = reduce_phase(client, rubric, rubrica_texto_latex, all_candidates, rigor_val, max_observaciones)
         
         informe_final.append({
             "rubrica": rubric,
@@ -192,7 +194,7 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
         res = item['resultado']
         st.subheader(f"📌 {item['rubrica']} - Puntaje: {res.get('puntaje', 0)}")
         st.write(f"**Sustento Teórico (APA):** {res.get('sustento_teorico')}")
-        for err in res.get('top_3_errores', []):
+        for err in res.get('errores_hallados', []):
             st.error(f"**Observación:** {err.get('error_description')}\n\n**Evidencia Literal:** {err.get('exact_quote')}")
         total_score += int(res.get('puntaje', 0))
         st.divider()
@@ -218,6 +220,7 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
     # Generación de la Plantilla LaTeX
     latex_content = r"\documentclass[12pt,a4paper]{article}" + "\n"
     latex_content += r"\usepackage[utf8]{inputenc}" + "\n"
+    latex_content += r"\usepackage[T1]{fontenc}" + "\n"
     latex_content += r"\usepackage[spanish]{babel}" + "\n"
     latex_content += r"\usepackage{geometry}" + "\n"
     latex_content += r"\usepackage{xcolor}" + "\n"
@@ -241,7 +244,7 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
         latex_content += rf"\subsection*{{{rubrica_esc} (Puntaje Asignado: {puntaje})}}" + "\n"
         latex_content += rf"\textbf{{Sustento Teórico (APA):}} {sustento_esc} \vspace{{0.3cm}} \\" + "\n"
         
-        errores = res.get('top_3_errores', [])
+        errores = res.get('errores_hallados', [])
         if errores:
             latex_content += r"\begin{itemize}" + "\n"
             for err in errores:
