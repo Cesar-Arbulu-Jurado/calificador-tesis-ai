@@ -4,6 +4,9 @@ import json
 import os
 import subprocess
 from google import genai
+import smtplib
+from email.message import EmailMessage
+import re
 
 # Configuración de página
 st.set_page_config(page_title="Calificador Automático de Tesis", layout="wide")
@@ -17,7 +20,8 @@ with st.sidebar:
     evaluator_name = st.text_input("Nombre del Docente")
     evaluator_role = st.selectbox("Rol", ["Dictaminante", "Asesor", "Replicante"])
     university = st.text_input("Universidad")
-    email = st.text_input("Correo Electrónico")
+    email = st.text_input("Tu Correo Electrónico (Opcional)")
+    correo_destino = st.text_input("Correo electrónico del evaluado (Destino del PDF)")
     
     st.header("2. Nivel de Rigurosidad")
     rigor_level = st.radio("Selecciona el rigor:", [
@@ -140,8 +144,8 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor):
     return {"top_3_errores": [], "sustento_teorico": f"Error técnico de API crítico (Model Not Found): {error_msg}", "puntaje": 0}
 
 if st.button("Iniciar Evaluación Completa", type="primary"):
-    if not uploaded_file or not evaluator_name or not selected_rubrics:
-        st.warning("Completa los datos del evaluador, seleccionarúbricas y sube el PDF.")
+    if not uploaded_file or not evaluator_name or not selected_rubrics or not correo_destino:
+        st.warning("Completa los datos del evaluador, el correo de destino, selecciona rúbricas y sube el PDF.")
         st.stop()
         
     client = get_gemini_client()
@@ -195,4 +199,111 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
         
     st.markdown(f"### Puntaje Total: **{total_score}**")
     
-    st.info("En la nube, aquí se ejecuta 'pdflatex' para compilar el informe_final.tex y crear el botón de descarga del PDF.")
+    # ==========================
+    # MOTOR DE COMPILACIÓN LATEX
+    # ==========================
+    st.info("Compilando reporte formal en LaTeX (pdflatex)...")
+    
+    def escape_latex(text):
+        if not text:
+            return ""
+        # Especiales de LaTeX
+        chars = {
+            '&': r'\&', '%': r'\%', '$': r'\$', '#': r'\#', '_': r'\_',
+            '{': r'\{', '}': r'\}', '~': r'\textasciitilde{}', '^': r'\textasciicircum{}', '\\': r'\textbackslash{}'
+        }
+        escaped = "".join([chars.get(c, c) for c in text])
+        return escaped
+
+    # Generación de la Plantilla LaTeX
+    latex_content = r"\documentclass[12pt,a4paper]{article}" + "\n"
+    latex_content += r"\usepackage[utf8]{inputenc}" + "\n"
+    latex_content += r"\usepackage[spanish]{babel}" + "\n"
+    latex_content += r"\usepackage{geometry}" + "\n"
+    latex_content += r"\usepackage{xcolor}" + "\n"
+    latex_content += r"\geometry{margin=2.5cm}" + "\n"
+    latex_content += r"\begin{document}" + "\n\n"
+    latex_content += r"\begin{center}" + "\n"
+    latex_content += r"{\LARGE \textbf{Dictamen Oficial de Evaluación de Tesis}} \\ [0.5cm]" + "\n"
+    latex_content += r"\end{center}" + "\n\n"
+    
+    latex_content += rf"\textbf{{Evaluador:}} {escape_latex(evaluator_name)}\\" + "\n"
+    latex_content += rf"\textbf{{Rol:}} {escape_latex(evaluator_role)}\\" + "\n"
+    latex_content += rf"\textbf{{Institución:}} {escape_latex(university)}\\" + "\n\n"
+    latex_content += r"\hrule\vspace{0.5cm}" + "\n\n"
+
+    for item in informe_final:
+        res = item['resultado']
+        rubrica_esc = escape_latex(item['rubrica'])
+        sustento_esc = escape_latex(res.get('sustento_teorico', ''))
+        puntaje = res.get('puntaje', 0)
+        
+        latex_content += rf"\subsection*{{{rubrica_esc} (Puntaje Asignado: {puntaje})}}" + "\n"
+        latex_content += rf"\textbf{{Sustento Teórico (APA):}} {sustento_esc} \vspace{{0.3cm}} \\" + "\n"
+        
+        errores = res.get('top_3_errores', [])
+        if errores:
+            latex_content += r"\begin{itemize}" + "\n"
+            for err in errores:
+                desc_esc = escape_latex(err.get('error_description', ''))
+                quote_esc = escape_latex(err.get('exact_quote', ''))
+                latex_content += rf"  \item \textbf{{Observación:}} {desc_esc} \\ \textit{{Evidencia Cruda:}} ``{quote_esc}''" + "\n"
+            latex_content += r"\end{itemize}" + "\n"
+        latex_content += r"\vspace{0.5cm}" + "\n\n"
+
+    latex_content += r"\vfill\hrule\vspace{0.2cm}\begin{center}" + "\n"
+    latex_content += rf"\textbf{{PUNTAJE GLOBAL OBTENIDO: {total_score}}}" + "\n"
+    latex_content += r"\end{center}" + "\n\n"
+    latex_content += r"\end{document}"
+
+    os.makedirs("reportes_temp", exist_ok=True)
+    tex_path = os.path.join("reportes_temp", "informe_oficial.tex")
+    pdf_path = os.path.join("reportes_temp", "informe_oficial.pdf")
+
+    with open(tex_path, "w", encoding="utf-8") as f:
+        f.write(latex_content)
+
+    compilado_ok = True
+    try:
+        subprocess.run(["pdflatex", "-interaction=nonstopmode", "-output-directory=reportes_temp", tex_path], check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        compilado_ok = False
+        st.error("Error al compilar el PDF de LaTeX en la nube. Revisa los log de consola. Detalles: " + str(e.stderr.decode('utf-8', errors='ignore')))
+
+    if compilado_ok and os.path.exists(pdf_path):
+        with open(pdf_path, "rb") as pdf_file:
+            pdf_bytes = pdf_file.read()
+            
+        st.success("¡Documento LaTeX generado exitosamente!")
+        st.download_button(
+            label="📄 Descargar Informe Final (PDF)",
+            data=pdf_bytes,
+            file_name="Dictamen_Tesis.pdf",
+            mime="application/pdf"
+        )
+        
+        # ==========================
+        # MOTOR DE CORREO SMTP
+        # ==========================
+        try:
+            emisor = st.secrets["EMAIL_ADDRESS"]
+            clave_app = st.secrets["EMAIL_PASSWORD"]
+            
+            st.info(f"Enviando reporte de forma automática a {correo_destino} ...")
+            msg = EmailMessage()
+            msg['Subject'] = 'Resultados de Evaluación de Tesis - Dictamen IA'
+            msg['From'] = emisor
+            msg['To'] = correo_destino
+            msg.set_content(f"Estimado tesista/interesado,\n\nAdjunto sírvase encontrar el dictamen riguroso generado por {evaluator_name}.\n\nPuntaje Global: {total_score}\n\nAtentamente,\nRobot Calificador")
+            
+            msg.add_attachment(pdf_bytes, maintype='application', subtype='pdf', filename='Dictamen_Tesis.pdf')
+            
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(emisor, clave_app)
+                server.send_message(msg)
+                
+            st.success("📧 ¡Reporte enviado por correo exitosamente!")
+        except Exception as smtp_err:
+            st.warning("No se pudo enviar el correo.")
+            st.write("Asegúrate de haber configurado tu `EMAIL_ADDRESS` y `EMAIL_PASSWORD` (App Password de Gmail) en la sección 'Secrets' de la plataforma Streamlit Cloud.")
+            st.code(str(smtp_err))
