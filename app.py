@@ -231,6 +231,9 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
         text = unicodedata.normalize('NFKC', text)
         # Fuerza cambio manual del signo negativo matemático a guion normal
         text = text.replace('\u2212', '-')
+        # Filtrar caracteres de control ASCII (0x00 - 0x1F) exceptuando tab (\t) y newline (\n)
+        text = re.sub(r'[\x00-\x08\x0b-\x1f]', '', text)
+
 
         # Separar por comando enquote considerando coincidencias no codiciosas
         parts = re.split(r'(\\enquote\{.*?\})', text)
@@ -310,16 +313,21 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
     with open(tex_path, "w", encoding="utf-8") as f:
         f.write(latex_content)
 
-    compilado_ok = True
+    compilado_ok = False
+    if os.path.exists(pdf_path):
+        os.remove(pdf_path) # Limpiar PDF anterior por si acaso
+
     try:
-        subprocess.run(["pdflatex", "-interaction=nonstopmode", "-output-directory=reportes_temp", tex_path], check=True, capture_output=True)
-    except subprocess.CalledProcessError as e:
-        compilado_ok = False
-        stderr_log = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ""
-        stdout_log = e.stdout.decode('utf-8', errors='ignore') if e.stdout else ""
-        # Extraer las últimas líneas de error para no saturar la pantalla
-        full_log = (stdout_log + "\n" + stderr_log)[-2000:]
-        st.error("Error crítico de sintaxis en LaTeX:\n\n```text\n" + full_log + "\n```")
+        result = subprocess.run(["pdflatex", "-interaction=nonstopmode", "-output-directory=reportes_temp", tex_path], check=False, capture_output=True)
+        if os.path.exists(pdf_path):
+            compilado_ok = True
+        else:
+            stderr_log = result.stderr.decode('utf-8', errors='ignore') if result.stderr else ""
+            stdout_log = result.stdout.decode('utf-8', errors='ignore') if result.stdout else ""
+            full_log = (stdout_log + "\n" + stderr_log)[-4000:]
+            st.error("Error crítico de sintaxis en LaTeX:\n\n```text\n" + full_log + "\n```")
+    except Exception as e:
+        st.error(f"Error fatal al intentar ejecutar pdflatex: {str(e)}")
 
     if compilado_ok and os.path.exists(pdf_path):
         with open(pdf_path, "rb") as pdf_file:
