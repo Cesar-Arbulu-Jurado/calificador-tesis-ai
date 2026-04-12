@@ -223,85 +223,52 @@ def deduplicate_phase(client, informe_final):
             continue
     return informe_final
 
-if st.button("Iniciar Evaluación Completa", type="primary"):
-    if not uploaded_file or not evaluator_name or not selected_rubrics or not correo_destino:
-        st.warning("Completa los datos del evaluador, el correo de destino, selecciona rúbricas y sube el PDF.")
-        st.stop()
-        
-    client = get_gemini_client()
-    file_bytes = uploaded_file.read()
-    
-    st.info("Leyendo y particionando archivo PDF en memoria...")
+import threading
+import logging
+logging.basicConfig(level=logging.INFO)
+
+def procesar_tesis_background(file_bytes, client, selected_rubrics, rubricas_db, rigor_val, max_observaciones, evaluator_name, evaluator_role, university, correo_destino, app_secrets):
+    logging.info("Leyendo y particionando archivo PDF en memoria...")
     chunks = extract_chunks(file_bytes, chunk_size=15)
     
     informe_final = []
     todas_las_referencias = []
     
-    # Barra de progreso principal
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    total_steps = len(selected_rubrics)
-    
     for idx, rubric in enumerate(selected_rubrics):
         rubrica_texto_latex = rubricas_db[rubric]
-        status_text.text(f"Fase MAP [Gemini Flash]: Filtrando evidencias para '{rubric}' a lo largo del documento...")
-        
+        logging.info(f"Fase MAP para '{rubric}'...")
         all_candidates = []
         for chunk in chunks:
             candidates = map_phase(client, chunk, rubric, rubrica_texto_latex, rigor_val)
             if candidates:
                 all_candidates.extend(candidates)
                 
-        status_text.text(f"Fase REDUCE [Gemini Pro]: Consolidando evaluación rigurosa para '{rubric}'...")
+        logging.info(f"Fase REDUCE para '{rubric}'...")
         rubric_result = reduce_phase(client, rubric, rubrica_texto_latex, all_candidates, rigor_val, max_observaciones)
         
         informe_final.append({
             "rubrica": rubric,
             "resultado": rubric_result
         })
-        progress_bar.progress((idx + 1) / total_steps)
         
-    status_text.text("Fase DEDUPLICATE [Gemini]: Consolidando y eliminando observaciones redundantes...")
+    logging.info("Fase DEDUPLICATE...")
     informe_final = deduplicate_phase(client, informe_final)
-        
-    status_text.success("¡Evaluación de Inteligencia Artificial completada!")
     
-    # Renderizado en Pantalla
-    st.balloons()
-    st.header("Resultados de la Evaluación (Preview)")
-    
+    logging.info("Evaluación de IA completada. Calculando puntaje.")
     total_score = 0
     for item in informe_final:
         res = item['resultado']
-        st.subheader(f"📌 {item['rubrica']} - Puntaje: {res.get('puntaje', 0)}")
-        for obs in res.get('observaciones_narrativas', []):
-            ui_text = re.sub(r'\\enquote\{(.*?)\}', r'«\1»', obs)
-            st.error(ui_text)
         total_score += int(res.get('puntaje', 0))
-        st.divider()
         
-    st.markdown(f"### Puntaje Total: **{total_score}**")
-    
-    # ==========================
-    # MOTOR DE COMPILACIÓN LATEX
-    # ==========================
-    st.info("Compilando reporte formal en LaTeX (pdflatex)...")
+    logging.info("Compilando reporte en LaTeX...")
     
     def escape_latex(text):
         if not text:
             return ""
-        
         import unicodedata
-        # Normaliza variables matemáticas tipo U+1D45A a una mísera letra 'm' compatible con LaTeX
         text = unicodedata.normalize('NFKC', text)
-        # Fuerza cambio manual del signo negativo matemático a guion normal
         text = text.replace('\u2212', '-')
-        # Filtrar caracteres de control ASCII (0x00 - 0x1F) exceptuando tab (\t) y newline (\n)
         text = re.sub(r'[\x00-\x08\x0b-\x1f]', '', text)
-
-
-        # Separar por comando enquote considerando coincidencias no codiciosas
         parts = re.split(r'(\\enquote\{.*?\})', text)
         escaped_parts = []
         chars = {
@@ -310,8 +277,6 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
         }
         for p in parts:
             if p.startswith(r'\enquote{') and p.endswith('}'):
-                # Si es un enquote, la macro externa \enquote{} se mantiene.
-                # Lo de adentro se escapa.
                 inner_text = p[9:-1]
                 inner_esc = "".join([chars.get(c, c) for c in inner_text])
                 escaped_parts.append(rf"\enquote{{{inner_esc}}}")
@@ -319,7 +284,6 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
                 escaped_parts.append("".join([chars.get(c, c) for c in p]))
         return "".join(escaped_parts)
 
-    # Generación de la Plantilla LaTeX
     latex_content = r"\documentclass[12pt,a4paper]{article}" + "\n"
     latex_content += r"\usepackage[utf8]{inputenc}" + "\n"
     latex_content += r"\usepackage[T1]{fontenc}" + "\n"
@@ -361,7 +325,6 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
         latex_content += r"\newpage" + "\n"
         latex_content += r"\section*{Referencias Bibliográficas Consolidadas}" + "\n"
         latex_content += r"\begin{itemize}" + "\n"
-        # Limpieza de duplicados y orden
         referencias_unicas = sorted(list(set(todas_las_referencias)))
         for r in referencias_unicas:
             latex_content += rf"  \item {escape_latex(r)}" + "\n"
@@ -381,40 +344,29 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
 
     compilado_ok = False
     if os.path.exists(pdf_path):
-        os.remove(pdf_path) # Limpiar PDF anterior por si acaso
+        os.remove(pdf_path)
 
     try:
         result = subprocess.run(["pdflatex", "-interaction=nonstopmode", "-output-directory=reportes_temp", tex_path], check=False, capture_output=True)
         if os.path.exists(pdf_path):
             compilado_ok = True
         else:
-            stderr_log = result.stderr.decode('utf-8', errors='ignore') if result.stderr else ""
-            stdout_log = result.stdout.decode('utf-8', errors='ignore') if result.stdout else ""
-            full_log = (stdout_log + "\n" + stderr_log)[-4000:]
-            st.error("Error crítico de sintaxis en LaTeX:\n\n```text\n" + full_log + "\n```")
+            logging.error(f"Error LaTeX:\n{result.stdout.decode('utf-8', errors='ignore')} \n{result.stderr.decode('utf-8', errors='ignore')}")
     except Exception as e:
-        st.error(f"Error fatal al intentar ejecutar pdflatex: {str(e)}")
+        logging.error(f"Excepción pdflatex: {e}")
 
     if compilado_ok and os.path.exists(pdf_path):
         with open(pdf_path, "rb") as pdf_file:
             pdf_bytes = pdf_file.read()
             
-        st.success("¡Documento LaTeX generado exitosamente!")
-        st.download_button(
-            label="📄 Descargar Informe Final (PDF)",
-            data=pdf_bytes,
-            file_name="Dictamen_Tesis.pdf",
-            mime="application/pdf"
-        )
-        
-        # ==========================
-        # MOTOR DE CORREO SMTP
-        # ==========================
+        logging.info("Enviando correo...")
         try:
-            emisor = st.secrets["EMAIL_ADDRESS"]
-            clave_app = st.secrets["EMAIL_PASSWORD"]
-            
-            st.info(f"Enviando reporte de forma automática a {correo_destino} ...")
+            emisor = app_secrets.get("EMAIL_ADDRESS", "")
+            clave_app = app_secrets.get("EMAIL_PASSWORD", "")
+            if not emisor or not clave_app:
+                 logging.error("No se encontró EMAIL_ADDRESS o EMAIL_PASSWORD.")
+                 return
+
             msg = EmailMessage()
             msg['Subject'] = 'Resultados de Evaluación de Tesis - Dictamen IA'
             msg['From'] = emisor
@@ -427,8 +379,34 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
                 server.login(emisor, clave_app)
                 server.send_message(msg)
                 
-            st.success("📧 ¡Reporte enviado por correo exitosamente!")
+            logging.info("Reporte enviado exitosamente por correo.")
         except Exception as smtp_err:
-            st.warning("No se pudo enviar el correo.")
-            st.write("Asegúrate de haber configurado tu `EMAIL_ADDRESS` y `EMAIL_PASSWORD` (App Password de Gmail) en la sección 'Secrets' de la plataforma Streamlit Cloud.")
-            st.code(str(smtp_err))
+            logging.error(f"Error SMTP: {smtp_err}")
+
+if st.button("Iniciar Evaluación Completa", type="primary"):
+    if not uploaded_file or not evaluator_name or not selected_rubrics or not correo_destino:
+        st.warning("Completa los datos del evaluador, el correo de destino, selecciona rúbricas y sube el PDF.")
+        st.stop()
+        
+    client = get_gemini_client()
+    file_bytes = uploaded_file.read()
+    
+    try:
+        app_secrets = {
+            "EMAIL_ADDRESS": st.secrets["EMAIL_ADDRESS"],
+            "EMAIL_PASSWORD": st.secrets["EMAIL_PASSWORD"]
+        }
+    except Exception:
+        app_secrets = {}
+        st.error("Por favor, configura EMAIL_ADDRESS y EMAIL_PASSWORD en los secrets.")
+        st.stop()
+        
+    t = threading.Thread(target=procesar_tesis_background, args=(
+        file_bytes, client, selected_rubrics, rubricas_db, rigor_val,
+        max_observaciones, evaluator_name, evaluator_role, university,
+        correo_destino, app_secrets
+    ))
+    t.daemon = True
+    t.start()
+    
+    st.success("✅ La tesis se ha puesto en cola de procesamiento asíncrono en nuestros servidores. \n\nEste proceso integral tomará ~40 minutos ininterrumpidos en segundo plano. **Puedes cerrar esta ventana de tu navegador con seguridad**. El dictamen consolidado en PDF te llegará directamente al correo especificado.")
