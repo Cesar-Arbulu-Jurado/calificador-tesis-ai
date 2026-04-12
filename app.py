@@ -140,7 +140,7 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor, max_e
        - Cero uso del símbolo "$" monetario; usa exclusivamente "USD~$...$".
        - Jamás uses apóstrofos simples (') en mode matemático (emplea ^\\prime).
        - Expresa unidades físicas siempre dentro de modo matemático usando \\text{{}} (Ej. $10\\,\\text{{kg}}$). Sin anidación conflictiva.
-    8. TODO AUTOR debe aparecer en "referencias_apa".
+    8. TODO AUTOR debe aparecer en "referencias_apa" en FORMATO APA 7ma Edición estricto. Si contiene un enlace URL, enciérralo usando el comando \\url{enlace}. Ejemplo: Autor, A. (2020). Título. \\url{https://...}
     9. Asigna un "puntaje" entero.
     
     Devuelve EXACTAMENTE UN JSON PURO con las siguientes claves:
@@ -155,7 +155,7 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor, max_e
     }}
     """
     
-    modelos_reduce = ['gemini-3-pro-preview', 'gemini-3-pro', 'gemini-2.5-pro', 'gemini-1.5-pro-latest', 'gemini-pro']
+    modelos_reduce = ['gemini-3-pro-preview', 'gemini-3-pro', 'gemini-2.5-pro', 'gemini-1.5-pro-latest']
     error_msg = ""
     for m in modelos_reduce:
         try:
@@ -209,7 +209,7 @@ def deduplicate_phase(client, informe_final):
         ...
     ]
     """
-    modelos_dedup = ['gemini-2.5-pro', 'gemini-1.5-pro-latest', 'gemini-3-pro-preview', 'gemini-pro']
+    modelos_dedup = ['gemini-2.5-pro', 'gemini-1.5-pro-latest', 'gemini-3-pro-preview']
     for m in modelos_dedup:
         try:
             res = client.models.generate_content(
@@ -262,27 +262,18 @@ def procesar_tesis_background(file_bytes, client, selected_rubrics, rubricas_db,
         
     logging.info("Compilando reporte en LaTeX...")
     
-    def escape_latex(text):
-        if not text:
-            return ""
+    def escape_user_data(text):
+        if not text: return ""
+        chars = {'&': r'\&', '%': r'\%', '$': r'\$', '#': r'\#', '_': r'\_', '{': r'\{', '}': r'\}', '~': r'\textasciitilde{}', '^': r'\textasciicircum{}', '\\': r'\textbackslash{}'}
+        return "".join([chars.get(c, c) for c in text])
+
+    def sanitize_ai_latex(text):
+        if not text: return ""
         import unicodedata
         text = unicodedata.normalize('NFKC', text)
         text = text.replace('\u2212', '-')
         text = re.sub(r'[\x00-\x08\x0b-\x1f]', '', text)
-        parts = re.split(r'(\\enquote\{.*?\})', text)
-        escaped_parts = []
-        chars = {
-            '&': r'\&', '%': r'\%', '$': r'\$', '#': r'\#', '_': r'\_',
-            '{': r'\{', '}': r'\}', '~': r'\textasciitilde{}', '^': r'\textasciicircum{}', '\\': r'\textbackslash{}'
-        }
-        for p in parts:
-            if p.startswith(r'\enquote{') and p.endswith('}'):
-                inner_text = p[9:-1]
-                inner_esc = "".join([chars.get(c, c) for c in inner_text])
-                escaped_parts.append(rf"\enquote{{{inner_esc}}}")
-            else:
-                escaped_parts.append("".join([chars.get(c, c) for c in p]))
-        return "".join(escaped_parts)
+        return text
 
     latex_content = r"\documentclass[12pt,a4paper]{article}" + "\n"
     latex_content += r"\usepackage[utf8]{inputenc}" + "\n"
@@ -291,20 +282,21 @@ def procesar_tesis_background(file_bytes, client, selected_rubrics, rubricas_db,
     latex_content += r"\usepackage[spanish]{csquotes}" + "\n"
     latex_content += r"\usepackage{geometry}" + "\n"
     latex_content += r"\usepackage{xcolor}" + "\n"
+    latex_content += r"\usepackage[colorlinks=true,urlcolor=blue,linkcolor=black,citecolor=black]{hyperref}" + "\n"
     latex_content += r"\geometry{margin=2.5cm}" + "\n"
     latex_content += r"\begin{document}" + "\n\n"
     latex_content += r"\begin{center}" + "\n"
     latex_content += r"{\LARGE \textbf{Dictamen Oficial de Evaluación de Tesis}} \\ [0.5cm]" + "\n"
     latex_content += r"\end{center}" + "\n\n"
     
-    latex_content += rf"\textbf{{Evaluador:}} {escape_latex(evaluator_name)}\\" + "\n"
-    latex_content += rf"\textbf{{Rol:}} {escape_latex(evaluator_role)}\\" + "\n"
-    latex_content += rf"\textbf{{Institución:}} {escape_latex(university)}\\" + "\n\n"
+    latex_content += rf"\textbf{{Evaluador:}} {escape_user_data(evaluator_name)}\\" + "\n"
+    latex_content += rf"\textbf{{Rol:}} {escape_user_data(evaluator_role)}\\" + "\n"
+    latex_content += rf"\textbf{{Institución:}} {escape_user_data(university)}\\" + "\n\n"
     latex_content += r"\hrule\vspace{0.5cm}" + "\n\n"
 
     for item in informe_final:
         res = item['resultado']
-        rubrica_esc = escape_latex(item['rubrica'])
+        rubrica_esc = escape_user_data(item['rubrica'])
         puntaje = res.get('puntaje', 0)
         
         latex_content += rf"\subsection*{{{rubrica_esc} (Puntaje Asignado: {puntaje})}}" + "\n"
@@ -313,7 +305,7 @@ def procesar_tesis_background(file_bytes, client, selected_rubrics, rubricas_db,
         if observaciones:
             latex_content += r"\begin{itemize}" + "\n"
             for obs in observaciones:
-                latex_content += rf"  \item {escape_latex(obs)}" + "\n"
+                latex_content += rf"  \item {sanitize_ai_latex(obs)}" + "\n"
             latex_content += r"\end{itemize}" + "\n"
         
         referencias_bloque = res.get('referencias_apa', [])
@@ -324,11 +316,11 @@ def procesar_tesis_background(file_bytes, client, selected_rubrics, rubricas_db,
     if todas_las_referencias:
         latex_content += r"\newpage" + "\n"
         latex_content += r"\section*{Referencias Bibliográficas Consolidadas}" + "\n"
-        latex_content += r"\begin{itemize}" + "\n"
+        latex_content += r"\begin{list}{}{\setlength{\itemindent}{-1.27cm}\setlength{\leftmargin}{1.27cm}}" + "\n"
         referencias_unicas = sorted(list(set(todas_las_referencias)))
         for r in referencias_unicas:
-            latex_content += rf"  \item {escape_latex(r)}" + "\n"
-        latex_content += r"\end{itemize}" + "\n\n"
+            latex_content += rf"  \item {sanitize_ai_latex(r)}" + "\n"
+        latex_content += r"\end{list}" + "\n\n"
 
     latex_content += r"\vfill\hrule\vspace{0.2cm}\begin{center}" + "\n"
     latex_content += rf"\textbf{{PUNTAJE GLOBAL OBTENIDO: {total_score}}}" + "\n"
@@ -409,4 +401,4 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
     t.daemon = True
     t.start()
     
-    st.success("✅ La tesis se ha puesto en cola de procesamiento asíncrono en nuestros servidores. \n\nEste proceso integral tomará ~40 minutos ininterrumpidos en segundo plano. **Puedes cerrar esta ventana de tu navegador con seguridad**. El dictamen consolidado en PDF te llegará directamente al correo especificado.")
+    st.success("✅ La tesis se ha puesto en cola de procesamiento asíncrono en nuestros servidores. \n\nEste proceso integral tomará ~2 horas ininterrumpidas en segundo plano. **Puedes cerrar esta ventana de tu navegador con seguridad**. El dictamen consolidado en PDF te llegará directamente al correo especificado.")
