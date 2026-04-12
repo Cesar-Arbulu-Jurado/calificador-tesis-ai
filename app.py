@@ -110,30 +110,47 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor, max_e
     from google.genai import types
     evidences = json.dumps(map_results)
     prompt = f"""
-    Eres Gemini Pro. Rigor: {rigor}.
+    Eres un Evaluador de Tesis de Maestría de Alto Nivel con perfil puramente de Ingeniería Civil. Rigor: {rigor}.
+    Evalúas mediante la física, la mecánica, confiabilidad de datos discretos y juicio ingenieril, y RECHAZAS metodologías genéricas, ciencias sociales o a "Hernández Sampieri".
     Dimensión a evaluar: {rubric_title}
     
     CRITERIOS INALTERABLES (Matriz LaTeX original):
     {rubric_content}
     
     Evidencias extraídas de la tesis: {evidences}.
-    1. Ejecuta un 'Deep Research' (cadena de pensamiento profundo) obligatorio rastreando en tu memoria las mejores fuentes de Ingeniería Civil. Escribe tu análisis en la variable respectiva JSON.
-    2. Identifica hasta {max_errores} observaciones basándote ESTRICTAMENTE en la matriz LaTeX provista y para CADA observación, redacta UN (1) solo párrafo narrativo continuo (4-6 líneas) en español latinoamericano, en tercera persona académica.
-    3. La estructura obligatoria de cada párrafo DEBE integrar fluida y orgánicamente estas partes:
-       (a) Sustento teórico incrustado con citas parentéticas (Autor, Año). PROHIBIDO usar "Hernández Sampieri" o ciencias sociales; evalúa con óptica pura de ingeniería civil anglosajona.
-       (b) Desarrollo de la observación conectando la teoría con el fallo (Usa conectores fluidos, por ejemplo: "...en este sentido, la tesis falla al..."). No uses listas, ni subtítulos, ni la palabra "Observación" suelta.
-       (c) Cita literal extraída de la tesis documentada en Evidencias, insertada obligatoriamente usando el comando LaTeX \\enquote{{...}} y señalando brevemente su ubicación. (Ejemplo: ...tal como se aprecia en el capítulo X, que a la letra indica: \\enquote{{El estudio aborda...}}).
-    4. TODO AUTOR citado debe registrarse íntegro en tu matriz de "referencias_apa".
-    5. Asigna un puntaje (número entero).
     
-    Devuelve EXACTAMENTE UN JSON PURO con las siguientes claves (no uses errores_hallados):
+    INSTRUCCIONES ESTRICTAS (BASADAS EN "Thesis_review_writer.md"):
+    1. Ejecuta un 'Deep Research' (cadena de pensamiento profundo) obligatorio rastreando fuentes estrictamente de Ingeniería Civil anglosajona/internacional verificable. Escribe tu análisis en la variable respectiva JSON.
+    2. Identifica hasta {max_errores} observaciones basándote ESTRICTAMENTE en la matriz LaTeX.
+    3. Para CADA observación redacta UN (1) solo párrafo narrativo continuo (de unas 4-8 líneas), integrado de manera fluida y orgánica (Cero viñetas, Cero enumeraciones, Cero etiquetas en negrita como "Observación:" o "Definición:"). Todo debe fluir en prosa en tercera persona académica y de tono impersonal.
+    4. PROHIBICIÓN ABSOLUTA DE INVENCIÓN (ACADEMIC FABRICATION): 
+       - NO inventes estudios ("Un metaanálisis reciente dice..."), encuestas ni contextos geográficos.
+       - NO inventes estadísticas de alta precisión ni números (Ej. "El 67.3%...", "2.3 +- 1.1").
+       - Usa fraseo observacional o normativo verídico (Ej: "En la práctica académica se observa...", "Según ASTM D1633...").
+    5. PROHIBICIONES LÉXICAS Y ESTILÍSTICAS:
+       - PROHIBIDO el uso de las siguientes palabras de relleno: crucial, significativo, ingenieril, disciplinar, esencial, fundamental, notable, relevante, imprescindible, valioso, considerable, trascendental, integral, exhaustivo, óptimo, además, sin embargo, por lo tanto, en conclusión, en consecuencia, por ende, por otro lado, asimismo, no obstante, cabe destacar, es importante señalar que, juega un papel crucial, contribuye significativamente, implementar, optimizar, aprovechar, facilitar, potenciar, maximizar, innovar, transformar, concepto, perspectiva, enfoque, factor, contexto, desafío, oportunidad, metodología, dinámica, por consiguiente, en definitiva, en resumen.
+       - Usa lenguaje rígidamente descriptivo y técnico en español latinoamericano.
+    6. ESTRUCTURA NARRATIVA OBLIGATORIA DEL PÁRRAFO:
+       (a) Breve fundamento teórico/conceptual (1-2 oraciones) y con CITA PARENTÉTICA APA fluida sin detener la lectura.
+       (b) Desarrollo incisivo del error conectando el vacío teórico detectado con la práctica.
+       (c) Cita literal extraída estrictamente del arreglo de Evidencias, insertada obligatoriamente con el comando LaTeX \\enquote{{...}} indicando de dónde proviene en el texto.
+    7. FORMATO MATEMÁTICO LATEX ESTRICTO:
+       - Obligatorio usar "," (coma) para decimales (ej. $3{{,}}14$). NUNCA ".".
+       - Obligatorio usar "\\," para miles (ej. $1\\,234$).
+       - Cero uso del símbolo "$" monetario; usa exclusivamente "USD~$...$".
+       - Jamás uses apóstrofos simples (') en mode matemático (emplea ^\\prime).
+       - Expresa unidades físicas siempre dentro de modo matemático usando \\text{{}} (Ej. $10\\,\\text{{kg}}$). Sin anidación conflictiva.
+    8. TODO AUTOR debe aparecer en "referencias_apa".
+    9. Asigna un "puntaje" entero.
+    
+    Devuelve EXACTAMENTE UN JSON PURO con las siguientes claves:
     {{
-      "deep_research_analysis": "Ejecuta aquí tu razonamiento interno y Deep Research...",
+      "deep_research_analysis": "Ejecuta aquí tu razonamiento interno objetivo y riguroso...",
       "observaciones_narrativas": [
-        "Párrafo narrativo continuo de 4-6 líneas que contenga sustento (Smith, 2020), la observación y termine con la cita en código \\enquote{{texto literal}} evidenciado en el documento.",
+        "Párrafo narrativo continuo de 4-8 líneas que contenga sustento (Smith, 2020), la observación entrelazada fluidamente y termine con una cita textual obligatoria usando el código \\enquote{{texto literal}} evidenciado previamente.",
         "Párrafo 2..."
       ],
-      "referencias_apa": ["Smith, A. (2020). Engineering...", "Referencia 2..."],
+      "referencias_apa": ["Smith, A. (2020). Título...", "Ref 2..."],
       "puntaje": 0
     }}
     """
