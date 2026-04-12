@@ -177,6 +177,52 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor, max_e
             
     return {"observaciones_narrativas": [f"Error técnico de API crítico (Model Not Found o Bad JSON): {error_msg}"], "referencias_apa": [], "puntaje": 0}
 
+def deduplicate_phase(client, informe_final):
+    from google.genai import types
+    prompt = f"""
+    Eres un analista experto en la consolidación de informes técnicos de Ingeniería Civil.
+    Tienes el siguiente JSON que contiene la evaluación de distintos criterios (rúbricas) de una tesis:
+    {json.dumps(informe_final, ensure_ascii=False)}
+
+    INSTRUCCIONES ESTRICTAS:
+    1. Compara de forma secuencial y diferencial el texto de TODAS las observaciones ("observaciones_narrativas") a través de TODAS las rúbricas.
+    2. Si encuentras observaciones en distintas rúbricas que critiquen exactamente el mismo defecto metodológico, teórico o matemático (similitud conceptual o semántica >= 80%):
+       - Consolídalas en UNA SOLA observación narrativo-continua, integrando los detalles y evidencias de ambas.
+       - Mantén estrictamente el rigor académico civil, las comas en decimales, sin palabras prohibidas (crucial, significativo) y el uso de los comandos LaTeX \\enquote{{...}}.
+       - Ubica esta única observación consolidada EXCLUSIVAMENTE en la rúbrica donde apareció primero.
+       - ELIMINA la observación redundante de las rúbricas posteriores.
+    3. Respeta intactas las observaciones singulares (similitud < 80%).
+    4. NO alteres bajo ningún motivo los puntajes ("puntaje") de ninguna rúbrica.
+    5. Mantén y unifica todas las referencias APA requeridas por cada observación.
+
+    Devuelve EXACTAMENTE el esquema JSON original reconstruido con tus modificaciones (Debe ser la lista de diccionarios, uno por rúbrica):
+    [
+        {{
+            "rubrica": "Nombre 1",
+            "resultado": {{
+                "deep_research_analysis": "...",
+                "observaciones_narrativas": ["Obs consolidada o preservada..."],
+                "referencias_apa": ["..."],
+                "puntaje": X
+            }}
+        }}, 
+        ...
+    ]
+    """
+    modelos_dedup = ['gemini-2.5-pro', 'gemini-1.5-pro-latest', 'gemini-3-pro-preview', 'gemini-pro']
+    for m in modelos_dedup:
+        try:
+            res = client.models.generate_content(
+                model=m, 
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            parsed = json.loads(res.text)
+            return parsed if isinstance(parsed, list) else informe_final
+        except Exception:
+            continue
+    return informe_final
+
 if st.button("Iniciar Evaluación Completa", type="primary"):
     if not uploaded_file or not evaluator_name or not selected_rubrics or not correo_destino:
         st.warning("Completa los datos del evaluador, el correo de destino, selecciona rúbricas y sube el PDF.")
@@ -215,6 +261,9 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
             "resultado": rubric_result
         })
         progress_bar.progress((idx + 1) / total_steps)
+        
+    status_text.text("Fase DEDUPLICATE [Gemini]: Consolidando y eliminando observaciones redundantes...")
+    informe_final = deduplicate_phase(client, informe_final)
         
     status_text.success("¡Evaluación de Inteligencia Artificial completada!")
     
