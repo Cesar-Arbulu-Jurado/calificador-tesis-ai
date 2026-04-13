@@ -353,6 +353,10 @@ if st.button("Iniciar Evaluación Rápida (Multi-Agente Async)", type="primary")
         text = unicodedata.normalize('NFKC', text)
         text = text.replace('\u2212', '-')
         text = re.sub(r'[\x00-\x08\x0b-\x1f]', '', text)
+        # Escapado inteligente de caracteres reservados de LaTeX que suelen infiltrarse
+        text = re.sub(r'(?<!\\)&', r'\&', text)
+        text = re.sub(r'(?<!\\)%', r'\%', text)
+        text = re.sub(r'(?<!\\)#', r'\#', text)
         return text
 
     latex_content = r"\documentclass[12pt,a4paper]{article}" + "\n"
