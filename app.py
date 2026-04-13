@@ -140,7 +140,7 @@ def reduce_phase(client, rubric_title, rubric_content, map_results, rigor, max_e
        - Cero uso del símbolo "$" monetario; usa exclusivamente "USD~$...$".
        - Jamás uses apóstrofos simples (') en mode matemático (emplea ^\\prime).
        - Expresa unidades físicas siempre dentro de modo matemático usando \\text{{}} (Ej. $10\\,\\text{{kg}}$). Sin anidación conflictiva.
-    8. TODO AUTOR debe aparecer en "referencias_apa" en FORMATO APA 7ma Edición estricto. Si contiene un enlace URL, enciérralo usando el comando \\url{enlace}. Ejemplo: Autor, A. (2020). Título. \\url{https://...}
+    8. TODO AUTOR debe aparecer en "referencias_apa" en FORMATO APA 7ma Edición estricto. Si contiene un enlace URL, enciérralo usando el comando \\url{{enlace}}. Ejemplo: Autor, A. (2020). Título. \\url{{https://...}}
     9. Asigna un "puntaje" entero.
     
     Devuelve EXACTAMENTE UN JSON PURO con las siguientes claves:
