@@ -353,10 +353,38 @@ if st.button("Iniciar Evaluación Rápida (Multi-Agente Async)", type="primary")
         text = unicodedata.normalize('NFKC', text)
         text = text.replace('\u2212', '-')
         text = re.sub(r'[\x00-\x08\x0b-\x1f]', '', text)
-        # Escapado inteligente de caracteres reservados de LaTeX que suelen infiltrarse
+        
+        # Escapado inteligente de caracteres reservados
         text = re.sub(r'(?<!\\)&', r'\&', text)
         text = re.sub(r'(?<!\\)%', r'\%', text)
         text = re.sub(r'(?<!\\)#', r'\#', text)
+        
+        # Balanceo seguro de llaves de entorno para evitar colapso de \end{itemize}
+        stack = 0
+        balanced = []
+        for char in text:
+            if char == '{':
+                stack += 1
+                balanced.append(char)
+            elif char == '}':
+                if stack > 0:
+                    stack -= 1
+                    balanced.append(char)
+                # Ignorar llaves de cierre sobrantes si no hubo apertura previa
+            else:
+                balanced.append(char)
+                
+        # Completar llaves que hayan quedado abiertas
+        while stack > 0:
+            balanced.append('}')
+            stack -= 1
+            
+        text = "".join(balanced)
+        
+        # Balanceo matemático de signos de dólar
+        if text.count('$') % 2 != 0:
+            text += '$'
+            
         return text
 
     latex_content = r"\documentclass[12pt,a4paper]{article}" + "\n"
@@ -389,7 +417,8 @@ if st.button("Iniciar Evaluación Rápida (Multi-Agente Async)", type="primary")
         if observaciones:
             latex_content += r"\begin{itemize}" + "\n"
             for obs in observaciones:
-                latex_content += rf"  \item {sanitize_ai_latex(obs)}" + "\n"
+                # Usar \item\relax para prevenir que corchetes [ iniciales se traguen texto como label
+                latex_content += rf"  \item\relax {sanitize_ai_latex(obs)}" + "\n"
             latex_content += r"\end{itemize}" + "\n"
         
         latex_content += r"\vspace{0.5cm}" + "\n\n"
@@ -400,7 +429,8 @@ if st.button("Iniciar Evaluación Rápida (Multi-Agente Async)", type="primary")
         latex_content += r"\begin{list}{}{\setlength{\itemindent}{-1.27cm}\setlength{\leftmargin}{1.27cm}}" + "\n"
         referencias_unicas = sorted(list(set(todas_las_referencias)))
         for r in referencias_unicas:
-            latex_content += rf"  \item {sanitize_ai_latex(r)}" + "\n"
+            # Usar \item\relax también para blindaje de listas
+            latex_content += rf"  \item\relax {sanitize_ai_latex(r)}" + "\n"
         latex_content += r"\end{list}" + "\n\n"
 
     latex_content += r"\vfill\hrule\vspace{0.2cm}\begin{center}" + "\n"
