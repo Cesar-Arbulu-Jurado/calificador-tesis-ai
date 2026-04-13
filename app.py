@@ -7,12 +7,13 @@ from google import genai
 import smtplib
 from email.message import EmailMessage
 import re
+import asyncio
 
 # Configuración de página
 st.set_page_config(page_title="Calificador Automático de Tesis", layout="wide")
 
-st.title("Calificador Automático de Tesis (Map-Reduce)")
-st.write("Sube el PDF, selecciona las rúbricas y obtén tu informe con citas literales.")
+st.title("Calificador Automático de Tesis (Multi-Agente Async)")
+st.write("Sube el PDF, selecciona las rúbricas y obtén tu informe con citas literales en tiempo récord.")
 
 # --- SIDEBAR: Configuración Institucional y de Evaluación ---
 with st.sidebar:
@@ -31,7 +32,6 @@ with st.sidebar:
         "2 - Intermedio (Estándar)", 
         "3 - Avanzado (Estricto)"
     ], index=1)
-    # Extraer el número del rigor
     rigor_val = int(rigor_level.split(" ")[0])
 
 # --- MAIN ÁREA: Carga de PDF y Rúbricas ---
@@ -39,7 +39,6 @@ st.header("3. Subir Tesis")
 uploaded_file = st.file_uploader("Selecciona el PDF de la tesis", type="pdf")
 
 st.header("4. Rúbricas a Evaluar")
-# Cargar la base de datos de matrices (compilada desde main.tex)
 db_path = os.path.join(os.path.dirname(__file__), "rubricas_extraidas.json")
 if os.path.exists(db_path):
     with open(db_path, "r", encoding="utf-8") as f:
@@ -49,10 +48,8 @@ else:
     st.stop()
 
 rubricas_disponibles = list(rubricas_db.keys())
-
 selected_rubrics = st.multiselect("Selecciona las secciones inalterables de LaTeX", rubricas_disponibles, default=rubricas_disponibles[:2])
 
-# Inicializar cliente de Gemini usando la variable de entorno que inyectará Streamlit Cloud
 def get_gemini_client():
     if "GEMINI_API_KEY" not in os.environ:
         st.error("Error: La llave GEMINI_API_KEY no está configurada en los Secrets de Streamlit.")
@@ -70,165 +67,239 @@ def extract_chunks(file_bytes, chunk_size=15):
             chunk_text = ""
     return chunks
 
-def map_phase(client, chunk_text, rubric_title, rubric_content, rigor):
+sema = asyncio.Semaphore(5)
+
+async def route_thesis_sections(client, chunks, rubrics):
+    from google.genai import types
+    chunks_summary = ""
+    for i, chunk in enumerate(chunks):
+        chunks_summary += f"--- CHUNK ID {i} ---\n{chunk[:2000]}...\n\n"
+        
+    prompt = f"""
+    Eres el Agente Director (Enrutador Jerárquico) de un Sistema Multi-Agente.
+    Tu misión es leer los resúmenes de los bloques (Chunks) de la tesis y decidir qué bloques contienen información útil para evaluar las siguientes rúbricas:
+    {json.dumps(rubrics, ensure_ascii=False)}
+    
+    Resúmenes de los bloques:
+    {chunks_summary}
+    
+    Devuelve EXACTAMENTE un JSON mapeando cada rúbrica con un arreglo de números enteros (Chunk IDs) relevantes. Si una rúbrica en teoría debe aplicarse transversalmente, asígnale todos los IDs.
+    Formato estricto:
+    {{
+       "Nombre de la Rúbrica 1": [0, 1, 3],
+       "Nombre de la Rúbrica 2": [4, 5]
+    }}
+    """
+    fallbacks = ['gemini-1.5-flash', 'gemini-2.5-flash']
+    for m in fallbacks:
+        try:
+            res = await client.aio.models.generate_content(
+                model=m,
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            return json.loads(res.text)
+        except Exception:
+            continue
+    return {r: list(range(len(chunks))) for r in rubrics}
+
+async def map_phase_async(client, chunk_text, rubric_title, rubric_content, rigor):
     from google.genai import types
     prompt = f"""
     Actúa como evaluador experto de tesis.
     Dimensión a evaluar: {rubric_title}
-    
     Nivel de rigor: {rigor}.
-    
     CRITERIOS INALTERABLES (Matriz LaTeX original):
     {rubric_content}
     
     REGLA OBLIGATORIA: Si hallas un error acorde a la matriz, extrae la cita EXACTA enmarcada en comillas ("...").
     Si parafraseas fallarás. Si no hay evidencia, devuelve vacío [].
     Retorna JSON puro con un arreglo de objetos: [{{"error_description": "...", "exact_quote": "..."}}].
-    
     Texto:
     {chunk_text}
     """
-    
     modelos_map = ['gemini-3-flash-preview', 'gemini-3-flash', 'gemini-2.5-flash', 'gemini-1.5-flash-latest', 'gemini-flash']
-    error_msg = ""
-    for m in modelos_map:
-        try:
-            res = client.models.generate_content(
-                model=m, 
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            return json.loads(res.text) if res.text else []
-        except Exception as e:
-            error_msg = str(e)
-            continue
-            
-    st.write(f"⚠️ Error en Map (Ningún modelo Flash funcionó): {error_msg}")
+    async with sema:
+        for m in modelos_map:
+            try:
+                res = await client.aio.models.generate_content(
+                    model=m, 
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                return json.loads(res.text) if res.text else []
+            except Exception:
+                continue
     return []
 
-def reduce_phase(client, rubric_title, rubric_content, map_results, rigor, max_errores):
+async def reduce_phase_async(client, rubric_title, rubric_content, map_results, rigor, max_errores):
     from google.genai import types
     evidences = json.dumps(map_results)
     prompt = f"""
     Eres un Evaluador de Tesis de Maestría de Alto Nivel con perfil puramente de Ingeniería Civil. Rigor: {rigor}.
     Evalúas mediante la física, la mecánica, confiabilidad de datos discretos y juicio ingenieril, y RECHAZAS metodologías genéricas, ciencias sociales o a "Hernández Sampieri".
     Dimensión a evaluar: {rubric_title}
-    
     CRITERIOS INALTERABLES (Matriz LaTeX original):
     {rubric_content}
     
-    Evidencias extraídas de la tesis: {evidences}.
+    Evidencias extraídas de la tesis: {evidences}
     
-    INSTRUCCIONES ESTRICTAS (BASADAS EN "Thesis_review_writer.md"):
-    1. Ejecuta un 'Deep Research' (cadena de pensamiento profundo) obligatorio rastreando fuentes estrictamente de Ingeniería Civil anglosajona/internacional verificable. Escribe tu análisis en la variable respectiva JSON.
-    2. Identifica hasta {max_errores} observaciones basándote ESTRICTAMENTE en la matriz LaTeX.
-    3. Para CADA observación redacta UN (1) solo párrafo narrativo continuo (de unas 4-8 líneas), integrado de manera fluida y orgánica (Cero viñetas, Cero enumeraciones, Cero etiquetas en negrita como "Observación:" o "Definición:"). Todo debe fluir en prosa en tercera persona académica y de tono impersonal.
-    4. PROHIBICIÓN ABSOLUTA DE INVENCIÓN (ACADEMIC FABRICATION): 
-       - NO inventes estudios ("Un metaanálisis reciente dice..."), encuestas ni contextos geográficos.
-       - NO inventes estadísticas de alta precisión ni números (Ej. "El 67.3%...", "2.3 +- 1.1").
-       - Usa fraseo observacional o normativo verídico (Ej: "En la práctica académica se observa...", "Según ASTM D1633...").
-    5. PROHIBICIONES LÉXICAS Y ESTILÍSTICAS:
-       - PROHIBIDO el uso de las siguientes palabras de relleno: crucial, significativo, ingenieril, disciplinar, esencial, fundamental, notable, relevante, imprescindible, valioso, considerable, trascendental, integral, exhaustivo, óptimo, además, sin embargo, por lo tanto, en conclusión, en consecuencia, por ende, por otro lado, asimismo, no obstante, cabe destacar, es importante señalar que, juega un papel crucial, contribuye significativamente, implementar, optimizar, aprovechar, facilitar, potenciar, maximizar, innovar, transformar, concepto, perspectiva, enfoque, factor, contexto, desafío, oportunidad, metodología, dinámica, por consiguiente, en definitiva, en resumen.
-       - Usa lenguaje rígidamente descriptivo y técnico en español latinoamericano.
-    6. ESTRUCTURA NARRATIVA OBLIGATORIA DEL PÁRRAFO:
-       (a) Breve fundamento teórico/conceptual (1-2 oraciones) y con CITA PARENTÉTICA APA fluida sin detener la lectura.
+    INSTRUCCIONES ESTRICTAS:
+    1. Ejecuta un 'Deep Research' estricto en fuentes de Ing. Civil anglosajona.
+    2. Identifica hasta {max_errores} observaciones basándote ESTRICTAMENTE en la matriz.
+    3. Para CADA observación redacta UN (1) solo párrafo narrativo continuo (4-8 líneas), integrado de manera fluida. Cero viñetas o negritas "Observación:".
+    4. PROHIBICIÓN DE INVENCIÓN (ACADEMIC FABRICATION).
+    5. PROHIBICIONES LÉXICAS: crucial, significativo, ingenieril, disciplinar, esencial (palabras de relleno prohibidas). Usa lenguaje descriptivo/técnico.
+    6. ESTRUCTURA:
+       (a) Breve fundamento teórico/conceptual con CITA PARENTÉTICA APA fluida sin detener lectura.
        (b) Desarrollo incisivo del error conectando el vacío teórico detectado con la práctica.
-       (c) Cita literal extraída estrictamente del arreglo de Evidencias, insertada obligatoriamente con el comando LaTeX \\enquote{{...}} indicando de dónde proviene en el texto.
+       (c) Cita literal insertada obligatoriamente con el comando LaTeX \\enquote{{...}} indicando proveniencia.
     7. FORMATO MATEMÁTICO LATEX ESTRICTO:
-       - Obligatorio usar "," (coma) para decimales (ej. $3{{,}}14$). NUNCA ".".
-       - Obligatorio usar "\\," para miles (ej. $1\\,234$).
-       - Cero uso del símbolo "$" monetario; usa exclusivamente "USD~$...$".
-       - Jamás uses apóstrofos simples (') en mode matemático (emplea ^\\prime).
-       - Expresa unidades físicas siempre dentro de modo matemático usando \\text{{}} (Ej. $10\\,\\text{{kg}}$). Sin anidación conflictiva.
+       - Coma para decimales (ej. $3{{,}}14$), \\, para miles $1\\,234$.
+       - USD~$...$
+       - No apóstrofos (emplea ^\\prime).
+       - Modo matemático \\text{{kg}}.
     8. TODO AUTOR debe aparecer en "referencias_apa" en FORMATO APA 7ma Edición estricto. Si contiene un enlace URL, enciérralo usando el comando \\url{{enlace}}. Ejemplo: Autor, A. (2020). Título. \\url{{https://...}}
-    9. Asigna un "puntaje" entero.
+    9. Asigna "puntaje" entero.
     
-    Devuelve EXACTAMENTE UN JSON PURO con las siguientes claves:
+    Devuelve EXACTAMENTE UN JSON PURO con estas claves:
     {{
       "deep_research_analysis": "Ejecuta aquí tu razonamiento interno objetivo y riguroso...",
       "observaciones_narrativas": [
-        "Párrafo narrativo continuo de 4-8 líneas que contenga sustento (Smith, 2020), la observación entrelazada fluidamente y termine con una cita textual obligatoria usando el código \\enquote{{texto literal}} evidenciado previamente.",
+        "Párrafo continuo...",
         "Párrafo 2..."
       ],
       "referencias_apa": ["Smith, A. (2020). Título...", "Ref 2..."],
       "puntaje": 0
     }}
     """
-    
     modelos_reduce = ['gemini-3-pro-preview', 'gemini-3-pro', 'gemini-2.5-pro', 'gemini-1.5-pro-latest']
-    error_msg = ""
-    for m in modelos_reduce:
-        try:
-            res = client.models.generate_content(
-                model=m, 
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            parsed = json.loads(res.text)
-            if not isinstance(parsed, dict):
-                if isinstance(parsed, list) and len(parsed) > 0 and isinstance(parsed[0], dict):
-                    return parsed[0]
-                else:
-                    raise Exception(f"El JSON devuelto no es un diccionario: {str(parsed)[0:100]}")
-            return parsed
-        except Exception as e:
-            error_msg = str(e)
-            continue
-            
-    return {"observaciones_narrativas": [f"Error técnico de API crítico (Model Not Found o Bad JSON): {error_msg}"], "referencias_apa": [], "puntaje": 0}
+    async with sema:
+        for m in modelos_reduce:
+            try:
+                res = await client.aio.models.generate_content(
+                    model=m, 
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                parsed = json.loads(res.text)
+                if not isinstance(parsed, dict):
+                    if isinstance(parsed, list) and len(parsed) > 0: return parsed[0]
+                    raise Exception("Not a dict")
+                return parsed
+            except Exception:
+                continue
+    return {"observaciones_narrativas": [f"Error técnico de consolidación en modelo Pro."], "referencias_apa": [], "puntaje": 0}
 
-def deduplicate_phase(client, informe_final):
+async def deduplicate_phase_async(client, informe_final):
     from google.genai import types
     prompt = f"""
-    Eres un analista experto en la consolidación de informes técnicos de Ingeniería Civil.
-    Tienes el siguiente JSON que contiene la evaluación de distintos criterios (rúbricas) de una tesis:
+    Eres un analista experto en consolidación semántica de informes técnicos.
+    JSON con resultados preliminares y rúbricas: 
     {json.dumps(informe_final, ensure_ascii=False)}
-
+    
     INSTRUCCIONES ESTRICTAS:
-    1. Compara de forma secuencial y diferencial el texto de TODAS las observaciones ("observaciones_narrativas") a través de TODAS las rúbricas.
-    2. Si encuentras observaciones en distintas rúbricas que critiquen exactamente el mismo defecto metodológico, teórico o matemático (similitud conceptual o semántica >= 80%):
-       - Consolídalas en UNA SOLA observación narrativo-continua, integrando los detalles y evidencias de ambas.
-       - Mantén estrictamente el rigor académico civil, las comas en decimales, sin palabras prohibidas (crucial, significativo) y el uso de los comandos LaTeX \\enquote{{...}}.
-       - Ubica esta única observación consolidada EXCLUSIVAMENTE en la rúbrica donde apareció primero.
-       - ELIMINA la observación redundante de las rúbricas posteriores.
-    3. Respeta intactas las observaciones singulares (similitud < 80%).
-    4. NO alteres bajo ningún motivo los puntajes ("puntaje") de ninguna rúbrica.
-    5. Mantén y unifica todas las referencias APA requeridas por cada observación.
-
-    Devuelve EXACTAMENTE el esquema JSON original reconstruido con tus modificaciones (Debe ser la lista de diccionarios, uno por rúbrica):
-    [
-        {{
-            "rubrica": "Nombre 1",
-            "resultado": {{
-                "deep_research_analysis": "...",
-                "observaciones_narrativas": ["Obs consolidada o preservada..."],
-                "referencias_apa": ["..."],
-                "puntaje": X
-            }}
-        }}, 
-        ...
-    ]
+    1. Compara diferencialmente el texto de TODAS las observaciones ("observaciones_narrativas") en el reporte.
+    2. Si hallas similitud o redundancia >= 80% criticando exactamente el mismo párrafo fundamental: 
+       Consolídalas en UNA sola observación narrativo-continua en la rúbrica donde apareció por primera vez, integrando orgánicamente ambos detalles. ELIMINA la redundante.
+       (Mantén el uso estricto de LaTeX, de signos y normativas de APA insertados previamente).
+    3. Respeta intactas las observaciones singulares (<80%).
+    4. MANTÉN PUNTAJES INTACTOS. No modifiques "puntaje".
+    5. Unifica referencias APA necesarias.
+    
+    Devuelve EXACTAMENTE el esquema JSON original reconstruido con tus fusiones (lista de diccionarios por rúbrica):
+    [ {{"rubrica": "...", "resultado": {{"deep_research_analysis": "...", "observaciones_narrativas": ["..."], "referencias_apa": ["..."], "puntaje": 0}} }} ]
     """
     modelos_dedup = ['gemini-2.5-pro', 'gemini-1.5-pro-latest', 'gemini-3-pro-preview']
-    for m in modelos_dedup:
-        try:
-            res = client.models.generate_content(
-                model=m, 
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            parsed = json.loads(res.text)
-            return parsed if isinstance(parsed, list) else informe_final
-        except Exception:
-            continue
+    async with sema:
+        for m in modelos_dedup:
+            try:
+                res = await client.aio.models.generate_content(
+                    model=m, 
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                parsed = json.loads(res.text)
+                return parsed if isinstance(parsed, list) else informe_final
+            except Exception:
+                continue
     return informe_final
 
-if st.button("Iniciar Evaluación Completa", type="primary"):
+async def procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, rigor_val, max_observaciones, progress_bar, status_text):
+    status_text.info("🧭 Agente Director: Enrutando bloques de la tesis jerárquicamente...")
+    router_map = await route_thesis_sections(client, chunks, selected_rubrics)
+    progress_bar.progress(0.1)
+    
+    status_text.info("⚡ Agentes Especialistas: Ejecutando Incursión Asíncrona Masiva (MAP) en paralelo...")
+    map_tasks = {}
+    for rubric in selected_rubrics:
+        rubrica_texto_latex = rubricas_db[rubric]
+        chunk_indices = router_map.get(rubric, list(range(len(chunks))))
+        
+        # Corrección en caso genai alucine letras en lugar de enteros
+        if not isinstance(chunk_indices, list):
+            chunk_indices = list(range(len(chunks)))
+            
+        for idx in chunk_indices:
+            try: 
+                idx = int(idx)
+                if 0 <= idx < len(chunks):
+                    map_tasks[(rubric, idx)] = asyncio.create_task(
+                        map_phase_async(client, chunks[idx], rubric, rubrica_texto_latex, rigor_val)
+                    )
+            except ValueError:
+                continue
+                
+    if map_tasks:
+        await asyncio.gather(*map_tasks.values())
+    progress_bar.progress(0.5)
+    
+    status_text.info("🧠 Agentes Consolidadores: Sintetizando descubrimientos de forma simultánea...")
+    reduce_tasks = {}
+    for rubric in selected_rubrics:
+        chunk_indices = router_map.get(rubric, list(range(len(chunks))))
+        if not isinstance(chunk_indices, list):
+            chunk_indices = list(range(len(chunks)))
+            
+        all_candidates = []
+        for idx in chunk_indices:
+            try:
+                idx = int(idx)
+                if 0 <= idx < len(chunks) and (rubric, idx) in map_tasks:
+                    res = map_tasks[(rubric, idx)].result()
+                    if res:
+                        all_candidates.extend(res)
+            except ValueError:
+                continue
+                    
+        rubrica_texto_latex = rubricas_db[rubric]
+        reduce_tasks[rubric] = asyncio.create_task(
+            reduce_phase_async(client, rubric, rubrica_texto_latex, all_candidates, rigor_val, max_observaciones)
+        )
+        
+    if reduce_tasks:
+        await asyncio.gather(*reduce_tasks.values())
+    progress_bar.progress(0.8)
+    
+    status_text.info("🧬 Agente Árbitro: Deduplicando semántica y uniendo el compendio final...")
+    informe_final_raw = []
+    for rubric in selected_rubrics:
+        informe_final_raw.append({
+            "rubrica": rubric,
+            "resultado": reduce_tasks[rubric].result()
+        })
+        
+    informe_final = await deduplicate_phase_async(client, informe_final_raw)
+    progress_bar.progress(1.0)
+    status_text.success("¡Operación Multi-Agente coronada con éxito en tiempo ultra-reducido!")
+    return informe_final
+
+if st.button("Iniciar Evaluación Rápida (Multi-Agente Async)", type="primary"):
     if not uploaded_file or not evaluator_name or not selected_rubrics or not correo_destino:
         st.warning("Completa los datos del evaluador, el correo de destino, selecciona rúbricas y sube el PDF.")
         st.stop()
         
-    st.warning("⚠️ PROCESO EN MARCHA: Por favor, NO cierres esta pestaña. Puedes minimizarla o cambiar de ventana, pero si la cierras, el servidor web apagará el motor de Inteligencia Artificial de forma irrevocable. El proceso tomará ~2 horas ininterrumpidas.")
+    st.info("⚠️ PROCESO ULTRA-RÁPIDO EN MARCHA: Por favor, espera sin cerrar la ventana. El nuevo Motor Asíncrono completará todo en un estimado de pocos minutos en lugar de horas.")
     
     try:
         app_secrets = {
@@ -246,39 +317,28 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
     st.info("Leyendo y particionando archivo PDF en memoria...")
     chunks = extract_chunks(file_bytes, chunk_size=15)
     
-    informe_final = []
-    todas_las_referencias = []
-    
     progress_bar = st.progress(0)
     status_text = st.empty()
-    total_steps = len(selected_rubrics)
     
-    for idx, rubric in enumerate(selected_rubrics):
-        rubrica_texto_latex = rubricas_db[rubric]
-        status_text.text(f"Fase MAP [Gemini Flash]: Filtrando evidencias para '{rubric}' a lo largo del documento...")
-        all_candidates = []
-        for chunk in chunks:
-            candidates = map_phase(client, chunk, rubric, rubrica_texto_latex, rigor_val)
-            if candidates:
-                all_candidates.extend(candidates)
-                
-        status_text.text(f"Fase REDUCE [Gemini Pro]: Consolidando evaluación rigurosa para '{rubric}'...")
-        rubric_result = reduce_phase(client, rubric, rubrica_texto_latex, all_candidates, rigor_val, max_observaciones)
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         
-        informe_final.append({
-            "rubrica": rubric,
-            "resultado": rubric_result
-        })
-        progress_bar.progress((idx + 1) / total_steps)
-        
-    status_text.text("Fase DEDUPLICATE [Gemini]: Consolidando y eliminando observaciones redundantes...")
-    informe_final = deduplicate_phase(client, informe_final)
+    informe_final = loop.run_until_complete(
+        procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, rigor_val, max_observaciones, progress_bar, status_text)
+    )
     
-    status_text.success("Evaluación de IA completada. Calculando puntaje.")
     total_score = 0
+    todas_las_referencias = []
+    # Safeguard en caso de fallo crítico en el loop
+    if not hasattr(informe_final, "__iter__"): informe_final = []
+    
     for item in informe_final:
-        res = item['resultado']
+        res = item.get('resultado', {})
         total_score += int(res.get('puntaje', 0))
+        todas_las_referencias.extend(res.get('referencias_apa', []))
         
     st.info("Compilando reporte formal en LaTeX (pdflatex)...")
     
@@ -328,9 +388,6 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
                 latex_content += rf"  \item {sanitize_ai_latex(obs)}" + "\n"
             latex_content += r"\end{itemize}" + "\n"
         
-        referencias_bloque = res.get('referencias_apa', [])
-        todas_las_referencias.extend(referencias_bloque)
-        
         latex_content += r"\vspace{0.5cm}" + "\n\n"
 
     if todas_las_referencias:
@@ -379,7 +436,7 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
             label="📄 Descargar Informe Final (PDF)",
             data=pdf_bytes,
             file_name="Dictamen_Tesis.pdf",
-            mime="application/pdf"
+            mime="application/pdf",
         )
         
         st.info("Enviando reporte de forma automática por correo...")
@@ -393,7 +450,7 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
                 msg['Subject'] = 'Resultados de Evaluación de Tesis - Dictamen IA'
                 msg['From'] = emisor
                 msg['To'] = correo_destino
-                msg.set_content(f"Estimado tesista/interesado,\n\nAdjunto sírvase encontrar el dictamen riguroso generado por {evaluator_name}.\n\nPuntaje Global: {total_score}\n\nAtentamente,\nRobot Calificador")
+                msg.set_content(f"Estimado tesista/interesado,\n\nAdjunto sírvase encontrar el dictamen riguroso generado con IA por {evaluator_name}.\n\nPuntaje Global: {total_score}\n\nAtentamente,\nRobot Calificador Multi-Agente")
                 
                 msg.add_attachment(pdf_bytes, maintype='application', subtype='pdf', filename='Dictamen_Tesis.pdf')
                 
@@ -401,6 +458,6 @@ if st.button("Iniciar Evaluación Completa", type="primary"):
                     server.login(emisor, clave_app)
                     server.send_message(msg)
                     
-                st.success("📧 ¡Reporte enviado exitosamente por correo a " + correo_destino + "!")
+                st.success(f"📧 ¡Reporte Multi-agente enviado exitosamente por correo a {correo_destino}!")
         except Exception as smtp_err:
             st.error(f"Error SMTP al enviar correo: {smtp_err}")
