@@ -223,44 +223,64 @@ def deduplicate_phase(client, informe_final):
             continue
     return informe_final
 
-import threading
-import logging
-logging.basicConfig(level=logging.INFO)
-
-def procesar_tesis_background(file_bytes, client, selected_rubrics, rubricas_db, rigor_val, max_observaciones, evaluator_name, evaluator_role, university, correo_destino, app_secrets):
-    logging.info("Leyendo y particionando archivo PDF en memoria...")
+if st.button("Iniciar Evaluación Completa", type="primary"):
+    if not uploaded_file or not evaluator_name or not selected_rubrics or not correo_destino:
+        st.warning("Completa los datos del evaluador, el correo de destino, selecciona rúbricas y sube el PDF.")
+        st.stop()
+        
+    st.warning("⚠️ PROCESO EN MARCHA: Por favor, NO cierres esta pestaña. Puedes minimizarla o cambiar de ventana, pero si la cierras, el servidor web apagará el motor de Inteligencia Artificial de forma irrevocable. El proceso tomará ~2 horas ininterrumpidas.")
+    
+    try:
+        app_secrets = {
+            "EMAIL_ADDRESS": st.secrets["EMAIL_ADDRESS"],
+            "EMAIL_PASSWORD": st.secrets["EMAIL_PASSWORD"]
+        }
+    except Exception:
+        app_secrets = {}
+        st.error("Por favor, configura EMAIL_ADDRESS y EMAIL_PASSWORD en los secrets.")
+        st.stop()
+        
+    client = get_gemini_client()
+    file_bytes = uploaded_file.read()
+    
+    st.info("Leyendo y particionando archivo PDF en memoria...")
     chunks = extract_chunks(file_bytes, chunk_size=15)
     
     informe_final = []
     todas_las_referencias = []
     
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    total_steps = len(selected_rubrics)
+    
     for idx, rubric in enumerate(selected_rubrics):
         rubrica_texto_latex = rubricas_db[rubric]
-        logging.info(f"Fase MAP para '{rubric}'...")
+        status_text.text(f"Fase MAP [Gemini Flash]: Filtrando evidencias para '{rubric}' a lo largo del documento...")
         all_candidates = []
         for chunk in chunks:
             candidates = map_phase(client, chunk, rubric, rubrica_texto_latex, rigor_val)
             if candidates:
                 all_candidates.extend(candidates)
                 
-        logging.info(f"Fase REDUCE para '{rubric}'...")
+        status_text.text(f"Fase REDUCE [Gemini Pro]: Consolidando evaluación rigurosa para '{rubric}'...")
         rubric_result = reduce_phase(client, rubric, rubrica_texto_latex, all_candidates, rigor_val, max_observaciones)
         
         informe_final.append({
             "rubrica": rubric,
             "resultado": rubric_result
         })
+        progress_bar.progress((idx + 1) / total_steps)
         
-    logging.info("Fase DEDUPLICATE...")
+    status_text.text("Fase DEDUPLICATE [Gemini]: Consolidando y eliminando observaciones redundantes...")
     informe_final = deduplicate_phase(client, informe_final)
     
-    logging.info("Evaluación de IA completada. Calculando puntaje.")
+    status_text.success("Evaluación de IA completada. Calculando puntaje.")
     total_score = 0
     for item in informe_final:
         res = item['resultado']
         total_score += int(res.get('puntaje', 0))
         
-    logging.info("Compilando reporte en LaTeX...")
+    st.info("Compilando reporte formal en LaTeX (pdflatex)...")
     
     def escape_user_data(text):
         if not text: return ""
@@ -343,62 +363,44 @@ def procesar_tesis_background(file_bytes, client, selected_rubrics, rubricas_db,
         if os.path.exists(pdf_path):
             compilado_ok = True
         else:
-            logging.error(f"Error LaTeX:\n{result.stdout.decode('utf-8', errors='ignore')} \n{result.stderr.decode('utf-8', errors='ignore')}")
+            stderr_log = result.stderr.decode('utf-8', errors='ignore') if result.stderr else ""
+            stdout_log = result.stdout.decode('utf-8', errors='ignore') if result.stdout else ""
+            full_log = (stdout_log + "\n" + stderr_log)[-4000:]
+            st.error("Error crítico de sintaxis en LaTeX:\n\n```text\n" + full_log + "\n```")
     except Exception as e:
-        logging.error(f"Excepción pdflatex: {e}")
+        st.error(f"Excepción pdflatex: {e}")
 
     if compilado_ok and os.path.exists(pdf_path):
         with open(pdf_path, "rb") as pdf_file:
             pdf_bytes = pdf_file.read()
             
-        logging.info("Enviando correo...")
+        st.success("¡Documento LaTeX generado exitosamente!")
+        st.download_button(
+            label="📄 Descargar Informe Final (PDF)",
+            data=pdf_bytes,
+            file_name="Dictamen_Tesis.pdf",
+            mime="application/pdf"
+        )
+        
+        st.info("Enviando reporte de forma automática por correo...")
         try:
             emisor = app_secrets.get("EMAIL_ADDRESS", "")
             clave_app = app_secrets.get("EMAIL_PASSWORD", "")
             if not emisor or not clave_app:
-                 logging.error("No se encontró EMAIL_ADDRESS o EMAIL_PASSWORD.")
-                 return
-
-            msg = EmailMessage()
-            msg['Subject'] = 'Resultados de Evaluación de Tesis - Dictamen IA'
-            msg['From'] = emisor
-            msg['To'] = correo_destino
-            msg.set_content(f"Estimado tesista/interesado,\n\nAdjunto sírvase encontrar el dictamen riguroso generado por {evaluator_name}.\n\nPuntaje Global: {total_score}\n\nAtentamente,\nRobot Calificador")
-            
-            msg.add_attachment(pdf_bytes, maintype='application', subtype='pdf', filename='Dictamen_Tesis.pdf')
-            
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(emisor, clave_app)
-                server.send_message(msg)
+                 st.error("No se encontró EMAIL_ADDRESS o EMAIL_PASSWORD en los secrets.")
+            else:
+                msg = EmailMessage()
+                msg['Subject'] = 'Resultados de Evaluación de Tesis - Dictamen IA'
+                msg['From'] = emisor
+                msg['To'] = correo_destino
+                msg.set_content(f"Estimado tesista/interesado,\n\nAdjunto sírvase encontrar el dictamen riguroso generado por {evaluator_name}.\n\nPuntaje Global: {total_score}\n\nAtentamente,\nRobot Calificador")
                 
-            logging.info("Reporte enviado exitosamente por correo.")
+                msg.add_attachment(pdf_bytes, maintype='application', subtype='pdf', filename='Dictamen_Tesis.pdf')
+                
+                with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                    server.login(emisor, clave_app)
+                    server.send_message(msg)
+                    
+                st.success("📧 ¡Reporte enviado exitosamente por correo a " + correo_destino + "!")
         except Exception as smtp_err:
-            logging.error(f"Error SMTP: {smtp_err}")
-
-if st.button("Iniciar Evaluación Completa", type="primary"):
-    if not uploaded_file or not evaluator_name or not selected_rubrics or not correo_destino:
-        st.warning("Completa los datos del evaluador, el correo de destino, selecciona rúbricas y sube el PDF.")
-        st.stop()
-        
-    client = get_gemini_client()
-    file_bytes = uploaded_file.read()
-    
-    try:
-        app_secrets = {
-            "EMAIL_ADDRESS": st.secrets["EMAIL_ADDRESS"],
-            "EMAIL_PASSWORD": st.secrets["EMAIL_PASSWORD"]
-        }
-    except Exception:
-        app_secrets = {}
-        st.error("Por favor, configura EMAIL_ADDRESS y EMAIL_PASSWORD en los secrets.")
-        st.stop()
-        
-    t = threading.Thread(target=procesar_tesis_background, args=(
-        file_bytes, client, selected_rubrics, rubricas_db, rigor_val,
-        max_observaciones, evaluator_name, evaluator_role, university,
-        correo_destino, app_secrets
-    ))
-    t.daemon = True
-    t.start()
-    
-    st.success("✅ La tesis se ha puesto en cola de procesamiento asíncrono en nuestros servidores. \n\nEste proceso integral tomará ~2 horas ininterrumpidas en segundo plano. **Puedes cerrar esta ventana de tu navegador con seguridad**. El dictamen consolidado en PDF te llegará directamente al correo especificado.")
+            st.error(f"Error SMTP al enviar correo: {smtp_err}")
