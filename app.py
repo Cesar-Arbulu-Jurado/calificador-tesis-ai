@@ -125,6 +125,8 @@ async def map_phase_async(client, chunk_text, rubric_title, rubric_content, rigo
     Actúa como evaluador experto de tesis. Dimensión a evaluar: {rubric_title}
     CRITERIOS INALTERABLES:
     {rubric_content}
+    
+    PROSCRIPCIÓN SUPREMA: Jamás extraigas evidencias que justifiquen hallazgos mencionando a metodólogos de ciencias sociales en español (ej. Hernández Sampieri). Están prohibidos y vetados en Ingeniería Civil.
     Si hallas un error, extrae la cita EXACTA enmarcada en comillas ("...").
     Retorna JSON: [{{"error_description": "...", "exact_quote": "..."}}].
     Texto:\n{chunk_text}
@@ -151,19 +153,20 @@ async def reduce_phase_async(client, rubric_title, rubric_content, map_results, 
     REGLAS METAPROMPT: {thesis_rules}
     
     INSTRUCCIONES CLAVES:
-    1. Identifica hasta {max_errores} observaciones basándote estrictamente en evidencias.
-    2. CERO FABRICACIÓN.
-    3. TODO AUTOR debe aparecer en "referencias_apa". Enlaces web en \url{{enlace}}.
+    1. Identifica hasta {max_errores} observaciones basándote estrictamente en evidencias. CERO FABRICACIÓN.
+    2. MANDATO INQUEBRANTABLE (ANTIBIBLATEX): Escribe las referencias bibliográficas y las citas parentéticas en "texto plano". PROHIBIDO INYECTAR COMANDOS LATEX BIBTEX como \cite{{}}, \textcite{{}}, \parencite{{}}. Hazlo literamente así: (Autor, Año). Si usas \cite{{...}} te auto-destruirás y dañarás el reporte.
+    3. MANDATO OBLIGATORIO (ANTISOCIAL): Jamás cites ni listes metodología social, ni utilices postulados de Hernández Sampieri o afines en español. Si el tesista citó a Sampieri para justificar Ingeniería Civil, destrúyelo críticamente en el reporte como un error inaceptable de alcance metodológico.
     
     Formato JSON Obligatorio:
     {{
       "deep_research_analysis": "Contexto objetivamente deducido...",
-      "observaciones_narrativas": ["Párrafo hiper-técnico 1...", "Párrafo interactivo fluido LaTeX..."],
-      "referencias_apa": ["Smith, A... \url{{...}}"],
+      "observaciones_narrativas": ["Párrafo hiper-técnico 1...", "Párrafo interactivo fluido LaTeX SIN usar macro \cite..."],
+      "referencias_apa": ["Smith, A. (2020)... \url{{...}}"],
       "puntaje": 0
     }}
     """
     modelos_reduce = ['gemini-3-pro-preview', 'gemini-3-pro', 'gemini-2.5-pro', 'gemini-1.5-pro-latest']
+    last_error = ""
     async with sema:
         for m in modelos_reduce:
             try:
@@ -171,9 +174,10 @@ async def reduce_phase_async(client, rubric_title, rubric_content, map_results, 
                 parsed = json.loads(res.text)
                 if isinstance(parsed, list) and len(parsed) > 0: return parsed[0]
                 if isinstance(parsed, dict): return parsed
-            except Exception:
+            except Exception as e:
+                last_error = str(e)
                 continue
-    return {"observaciones_narrativas": ["Error en consolidación."], "referencias_apa": [], "puntaje": 0}
+    return {"observaciones_narrativas": [rf"Fallo crítico interno en el motor de consolidación al procesar esta rúbrica. Último Traceback capturado: \textbf{{{last_error}}}"], "referencias_apa": [], "puntaje": 0}
 
 async def deduplicate_phase_async(client, informe_final, sema):
     from google.genai import types
@@ -211,6 +215,24 @@ async def url_is_valid_and_matches(ref, client):
         return None if "FALSO" in res.text.upper() else ref
     except Exception:
         return ref
+
+async def semantic_deduplicate_references_async(client, refs, logs):
+    if not refs: return []
+    logs("Activando Agente Deduplicador Bibliográfico Global...")
+    prompt = f"""
+    Eres un bibliotecario algorítmico. Lista de referencias APA crudas:
+    {json.dumps(refs, ensure_ascii=False)}
+    
+    Misión: Deduplica las variaciones del mismo paper (e.g. si está la versión completa con DOI/Edition y otra incompleta, desecha la incompleta y mantén la completa). 
+    Retorna un JSON estricto con un único array final destilado de cadenas APA: ["Ref Mejorada 1", "Ref Mejorada 2"].
+    """
+    try:
+        from google.genai import types
+        res = await client.aio.models.generate_content(model='gemini-1.5-flash', contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
+        return json.loads(res.text)
+    except Exception as e:
+        logs(f"Falla en deduplicación semántica bibliográfica: {e}")
+        return sorted(list(set(refs)))
 
 async def verify_bibliography_agent_async(client, informe_final, logs):
     logs("Inquisidor: Verificando literatura en la Deep Web...")
@@ -265,7 +287,15 @@ async def procesar_tesis_async(client, chunks, rubrics, rubricas_db, rigor, max_
     inf_raw = [{"rubrica": r, "resultado": reduce_tasks[r].result()} for r in rubrics]
     inf_final = await deduplicate_phase_async(client, inf_raw, sema)
     
-    return await verify_bibliography_agent_async(client, inf_final, logs)
+    inf_final = await verify_bibliography_agent_async(client, inf_final, logs)
+    
+    logs("Recolectando bibliografía maestra de todos los nodos...")
+    all_raw_refs = []
+    for r in inf_final:
+        all_raw_refs.extend(r.get('resultado', {}).get('referencias_apa', []))
+        
+    unique_refs = await semantic_deduplicate_references_async(client, all_raw_refs, logs)
+    return inf_final, unique_refs
 
 def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max_obs, thesis_rules, api_key, evaluator_name, evaluator_role, university, correo_destino, app_secrets):
     def daemon_log(msg): print(f"[DAEMON] {msg}")
@@ -280,7 +310,7 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     asyncio.set_event_loop(loop)
     
     try:
-        informe_verificado = loop.run_until_complete(
+        informe_verificado, referencias_consolidadas = loop.run_until_complete(
             procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, rigor_val, max_obs, thesis_rules, daemon_log)
         )
     except Exception as e:
@@ -292,15 +322,12 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     
     # Renderizado y email
     total_score = 0
-    todas_las_referencias = []
-    
     daemon_log(f"Compilando documento en reportes_temp")
     if not hasattr(informe_verificado, "__iter__"): informe_verificado = []
     
     for item in informe_verificado:
         res = item.get('resultado', {})
         total_score += int(res.get('puntaje', 0))
-        todas_las_referencias.extend(res.get('referencias_apa', []))
         
     def escape_user_data(text):
         if not text: return ""
@@ -358,11 +385,10 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
             latex_content += r"\end{itemize}" + "\n"
         latex_content += r"\vspace{0.5cm}" + "\n\n"
 
-    if todas_las_referencias:
+    if referencias_consolidadas:
         latex_content += r"\newpage\section*{Referencias Bibliográficas Consolidadas}" + "\n"
         latex_content += r"\begin{list}{}{\setlength{\itemindent}{-1.27cm}\setlength{\leftmargin}{1.27cm}}" + "\n"
-        referencias_unicas = sorted(list(set(todas_las_referencias)))
-        for r in referencias_unicas:
+        for r in referencias_consolidadas:
             latex_content += rf"  \item\relax {sanitize_ai_latex(r)}" + "\n"
         latex_content += r"\end{list}" + "\n\n"
 
