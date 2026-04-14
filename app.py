@@ -271,8 +271,8 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     def daemon_log(msg): print(f"[DAEMON] {msg}")
     
     daemon_log("Iniciando Proceso Asíncrono Desatendido")
-    genai.configure(api_key=api_key)
-    client = genai.Client()
+    os.environ["GEMINI_API_KEY"] = api_key
+    client = genai.Client(api_key=api_key)
     
     chunks = extract_chunks(file_bytes, chunk_size=15)
     
