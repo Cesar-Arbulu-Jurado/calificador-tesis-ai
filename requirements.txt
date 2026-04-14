@@ -1,3 +1,5 @@
 streamlit
 PyMuPDF
 google-genai
+aiohttp
+beautifulsoup4

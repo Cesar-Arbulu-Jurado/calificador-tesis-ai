@@ -8,12 +8,14 @@ import smtplib
 from email.message import EmailMessage
 import re
 import asyncio
+import aiohttp
+from bs4 import BeautifulSoup
 
 # Configuración de página
 st.set_page_config(page_title="Calificador Automático de Tesis", layout="wide")
 
-st.title("Calificador Automático de Tesis (Multi-Agente Async)")
-st.write("Sube el PDF, selecciona las rúbricas y obtén tu informe con citas literales en tiempo récord.")
+st.title("Calificador Automático de Tesis (Multi-Agente Async + Inquisidor Bibliográfico)")
+st.write("Sube el PDF, selecciona las rúbricas y obtén tu informe riguroso.")
 
 # --- SIDEBAR: Configuración Institucional y de Evaluación ---
 with st.sidebar:
@@ -49,6 +51,18 @@ else:
 
 rubricas_disponibles = list(rubricas_db.keys())
 selected_rubrics = st.multiselect("Selecciona las secciones inalterables de LaTeX", rubricas_disponibles, default=rubricas_disponibles[:2])
+
+@st.cache_data
+def load_thesis_writer_rules():
+    txt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "1. Thesis_review_writer.md")
+    if os.path.exists(txt_path):
+        with open(txt_path, "r", encoding="utf-8") as f:
+            return f.read()
+    txt_path_local = os.path.join(os.path.dirname(__file__), "1. Thesis_review_writer.md")
+    if os.path.exists(txt_path_local):
+         with open(txt_path_local, "r", encoding="utf-8") as f:
+            return f.read()
+    return "NORMA: Redactar de forma objetiva, densa y en formato APA 7ma Edición."
 
 def get_gemini_client():
     if "GEMINI_API_KEY" not in os.environ:
@@ -135,38 +149,34 @@ async def map_phase_async(client, chunk_text, rubric_title, rubric_content, rigo
 async def reduce_phase_async(client, rubric_title, rubric_content, map_results, rigor, max_errores):
     from google.genai import types
     evidences = json.dumps(map_results)
+    thesis_rules = load_thesis_writer_rules()
+    
     prompt = f"""
     Eres un Evaluador de Tesis de Maestría de Alto Nivel con perfil puramente de Ingeniería Civil. Rigor: {rigor}.
-    Evalúas mediante la física, la mecánica, confiabilidad de datos discretos y juicio ingenieril, y RECHAZAS metodologías genéricas, ciencias sociales o a "Hernández Sampieri".
     Dimensión a evaluar: {rubric_title}
+    
     CRITERIOS INALTERABLES (Matriz LaTeX original):
     {rubric_content}
     
-    Evidencias extraídas de la tesis: {evidences}
+    Evidencias extraídas temporalmente de la tesis por tus agentes subordinados: {evidences}
     
-    INSTRUCCIONES ESTRICTAS:
-    1. Ejecuta un 'Deep Research' estricto en fuentes de Ing. Civil anglosajona.
-    2. Identifica hasta {max_errores} observaciones basándote ESTRICTAMENTE en la matriz.
-    3. Para CADA observación redacta UN (1) solo párrafo narrativo continuo (4-8 líneas), integrado de manera fluida. Cero viñetas o negritas "Observación:".
-    4. PROHIBICIÓN DE INVENCIÓN (ACADEMIC FABRICATION).
-    5. PROHIBICIONES LÉXICAS: crucial, significativo, ingenieril, disciplinar, esencial (palabras de relleno prohibidas). Usa lenguaje descriptivo/técnico.
-    6. ESTRUCTURA:
-       (a) Breve fundamento teórico/conceptual con CITA PARENTÉTICA APA fluida sin detener lectura.
-       (b) Desarrollo incisivo del error conectando el vacío teórico detectado con la práctica.
-       (c) Cita literal insertada obligatoriamente con el comando LaTeX \\enquote{{...}} indicando proveniencia.
-    7. FORMATO MATEMÁTICO LATEX ESTRICTO:
-       - Coma para decimales (ej. $3{{,}}14$), \\, para miles $1\\,234$.
-       - USD~$...$
-       - No apóstrofos (emplea ^\\prime).
-       - Modo matemático \\text{{kg}}.
-    8. TODO AUTOR debe aparecer en "referencias_apa" en FORMATO APA 7ma Edición estricto. Si contiene un enlace URL, enciérralo usando el comando \\url{{enlace}}. Ejemplo: Autor, A. (2020). Título. \\url{{https://...}}
-    9. Asigna "puntaje" entero.
+    A continuación, tienes las REGLAS ABSOLUTAS del Meta-Prompt que debes obedecer meticulosamente. Presta especial atención a la Pestaña 8, 9, 10 y 11 sobre estructura, prohibiciones léxicas y formato LaTeX estricto de Ingeniería Civil:
+    
+    ------ METAPROMPT THESIS_REVIEW_WRITER ------
+    {thesis_rules}
+    ---------------------------------------------
+    
+    INSTRUCCIONES FINALES DE EMISIÓN DE DICTAMEN:
+    1. Ejecuta el dictamen sobre la dimensión solicitada cumpliendo irrestrictamente TODAS las prohibiciones léxicas, estilo narrativo y estructura matemática declarada.
+    2. Identifica hasta {max_errores} observaciones basándote estrictamente en las evidencias reales. CERO FABRICACIÓN ACADÉMICA.
+    3. TODO AUTOR debe aparecer en "referencias_apa" en FORMATO APA 7ma Edición estricto. Si le inventas o hallas un enlace URL que sea vivo, enciérralo usando el comando LaTeX \\url{{enlace_aqui}}.
+    4. Asigna "puntaje" entero.
     
     Devuelve EXACTAMENTE UN JSON PURO con estas claves:
     {{
       "deep_research_analysis": "Ejecuta aquí tu razonamiento interno objetivo y riguroso...",
       "observaciones_narrativas": [
-        "Párrafo continuo...",
+        "Párrafo narrativo impecable continuo sin etiquetas en negritas tal como manda el Prompt...",
         "Párrafo 2..."
       ],
       "referencias_apa": ["Smith, A. (2020). Título...", "Ref 2..."],
@@ -225,6 +235,81 @@ async def deduplicate_phase_async(client, informe_final):
                 continue
     return informe_final
 
+async def url_is_valid_and_matches(ref, client):
+    url_match = re.search(r'\\url\{([^}]+)\}', ref)
+    if not url_match:
+        url_match = re.search(r'(https?://[^\s]+)', ref)
+        
+    if not url_match:
+        return ref # Sin URL, se aprueba localmente
+        
+    url = url_match.group(1)
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            async with session.get(url, headers=headers, timeout=12) as response:
+                if response.status == 404: 
+                    return None # Enlace roto o inexistente
+                if response.status != 200:
+                    return ref # Pasa de largo si es un 403 Forbidden (ej. IEEE/Elsevier anti-bot)
+
+                html = await response.text()
+                
+        soup = BeautifulSoup(html, 'html.parser')
+        title = soup.title.string if soup.title else ""
+        text_preview = soup.get_text()[:400].replace('\n', ' ')
+        
+        from google.genai import types
+        prompt = f"""
+        El autor citó esta referencia en su tesis: "{ref}"
+        Hemos abierto la URL y el título web es: "{title}"
+        Vista previa del contenido de la URL: "{text_preview}"
+        
+        ¿Esta página web corresponde genuinamente a la referencia investigativa?
+        (A veces los tesistas inventan enlaces que redirigen a archivos aleatorios).
+        Responde "VALIDO" si tiene correlación lógica o está protegido por un muro de pago, o "FALSO" si manda a otra cosa estúpida o disparatada.
+        """
+        res = await client.aio.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=prompt,
+        )
+        if "FALSO" in res.text.upper():
+            return None # Eliminado por el Inquisidor
+            
+        return ref
+    except Exception:
+        # Fallo de conexión (DNS, Timeout), asumimos que el tesista tiene razón para no fallar injustamente
+        return ref
+
+async def verify_bibliography_agent_async(client, informe_final, status_text):
+    status_text.info("🌐 Agente Inquisidor: Verificando veracidad web y URLs de las referencias APA...")
+    import copy
+    informe_verificado = copy.deepcopy(informe_final)
+    
+    verifications = []
+    mapping = []
+    
+    for i, item in enumerate(informe_verificado):
+        res = item.get('resultado', {})
+        referencias = res.get('referencias_apa', [])
+        for j, ref in enumerate(referencias):
+            mapping.append((i, j))
+            verifications.append(url_is_valid_and_matches(ref, client))
+            
+    if verifications:
+        resultados = await asyncio.gather(*verifications)
+        for (i, j), valid_ref in zip(mapping, resultados):
+            if valid_ref is None:
+                informe_verificado[i]['resultado']['referencias_apa'][j] = None
+                
+    for item in informe_verificado:
+        res = item.get('resultado', {})
+        if 'referencias_apa' in res:
+            res['referencias_apa'] = [r for r in res['referencias_apa'] if r is not None]
+            
+    return informe_verificado
+
 async def procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, rigor_val, max_observaciones, progress_bar, status_text):
     status_text.info("🧭 Agente Director: Enrutando bloques de la tesis jerárquicamente...")
     router_map = await route_thesis_sections(client, chunks, selected_rubrics)
@@ -236,7 +321,6 @@ async def procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, ri
         rubrica_texto_latex = rubricas_db[rubric]
         chunk_indices = router_map.get(rubric, list(range(len(chunks))))
         
-        # Corrección en caso genai alucine letras en lugar de enteros
         if not isinstance(chunk_indices, list):
             chunk_indices = list(range(len(chunks)))
             
@@ -254,7 +338,7 @@ async def procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, ri
         await asyncio.gather(*map_tasks.values())
     progress_bar.progress(0.5)
     
-    status_text.info("🧠 Agentes Consolidadores: Sintetizando descubrimientos de forma simultánea...")
+    status_text.info("🧠 Agentes Consolidadores: Sintetizando descubrimientos bajo normativa MD...")
     reduce_tasks = {}
     for rubric in selected_rubrics:
         chunk_indices = router_map.get(rubric, list(range(len(chunks))))
@@ -279,7 +363,7 @@ async def procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, ri
         
     if reduce_tasks:
         await asyncio.gather(*reduce_tasks.values())
-    progress_bar.progress(0.8)
+    progress_bar.progress(0.7)
     
     status_text.info("🧬 Agente Árbitro: Deduplicando semántica y uniendo el compendio final...")
     informe_final_raw = []
@@ -290,16 +374,20 @@ async def procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, ri
         })
         
     informe_final = await deduplicate_phase_async(client, informe_final_raw)
+    progress_bar.progress(0.9)
+    
+    informe_verificado = await verify_bibliography_agent_async(client, informe_final, status_text)
+    
     progress_bar.progress(1.0)
     status_text.success("¡Operación Multi-Agente coronada con éxito en tiempo ultra-reducido!")
-    return informe_final
+    return informe_verificado
 
 if st.button("Iniciar Evaluación Rápida (Multi-Agente Async)", type="primary"):
     if not uploaded_file or not evaluator_name or not selected_rubrics or not correo_destino:
         st.warning("Completa los datos del evaluador, el correo de destino, selecciona rúbricas y sube el PDF.")
         st.stop()
         
-    st.info("⚠️ PROCESO ULTRA-RÁPIDO EN MARCHA: Por favor, espera sin cerrar la ventana. El nuevo Motor Asíncrono completará todo en un estimado de pocos minutos en lugar de horas.")
+    st.info("⚠️ PROCESO ULTRA-RÁPIDO EN MARCHA: Por favor, espera sin cerrar la ventana. El nuevo Motor Asíncrono completará todo en pocos minutos.")
     
     try:
         app_secrets = {
@@ -332,7 +420,6 @@ if st.button("Iniciar Evaluación Rápida (Multi-Agente Async)", type="primary")
     
     total_score = 0
     todas_las_referencias = []
-    # Safeguard en caso de fallo crítico en el loop
     if not hasattr(informe_final, "__iter__"): informe_final = []
     
     for item in informe_final:
@@ -354,12 +441,10 @@ if st.button("Iniciar Evaluación Rápida (Multi-Agente Async)", type="primary")
         text = text.replace('\u2212', '-')
         text = re.sub(r'[\x00-\x08\x0b-\x1f]', '', text)
         
-        # Escapado inteligente de caracteres reservados
         text = re.sub(r'(?<!\\)&', r'\&', text)
         text = re.sub(r'(?<!\\)%', r'\%', text)
         text = re.sub(r'(?<!\\)#', r'\#', text)
         
-        # Balanceo seguro de llaves de entorno para evitar colapso de \end{itemize}
         stack = 0
         balanced = []
         for char in text:
@@ -370,18 +455,15 @@ if st.button("Iniciar Evaluación Rápida (Multi-Agente Async)", type="primary")
                 if stack > 0:
                     stack -= 1
                     balanced.append(char)
-                # Ignorar llaves de cierre sobrantes si no hubo apertura previa
             else:
                 balanced.append(char)
                 
-        # Completar llaves que hayan quedado abiertas
         while stack > 0:
             balanced.append('}')
             stack -= 1
             
         text = "".join(balanced)
         
-        # Balanceo matemático de signos de dólar
         if text.count('$') % 2 != 0:
             text += '$'
             
@@ -394,9 +476,12 @@ if st.button("Iniciar Evaluación Rápida (Multi-Agente Async)", type="primary")
     latex_content += r"\usepackage[spanish]{csquotes}" + "\n"
     latex_content += r"\usepackage{geometry}" + "\n"
     latex_content += r"\usepackage{xcolor}" + "\n"
+    latex_content += r"\usepackage{microtype}" + "\n" # Corrector de colisiones y justificación
     latex_content += r"\usepackage[colorlinks=true,urlcolor=blue,linkcolor=black,citecolor=black]{hyperref}" + "\n"
     latex_content += r"\geometry{margin=2.5cm}" + "\n"
-    latex_content += r"\begin{document}" + "\n\n"
+    latex_content += r"\begin{document}" + "\n"
+    latex_content += r"\sloppy" + "\n\n" # Relajador del espaciamiento interpalabra
+    
     latex_content += r"\begin{center}" + "\n"
     latex_content += r"{\LARGE \textbf{Dictamen Oficial de Evaluación de Tesis}} \\ [0.5cm]" + "\n"
     latex_content += r"\end{center}" + "\n\n"
@@ -417,7 +502,6 @@ if st.button("Iniciar Evaluación Rápida (Multi-Agente Async)", type="primary")
         if observaciones:
             latex_content += r"\begin{itemize}" + "\n"
             for obs in observaciones:
-                # Usar \item\relax para prevenir que corchetes [ iniciales se traguen texto como label
                 latex_content += rf"  \item\relax {sanitize_ai_latex(obs)}" + "\n"
             latex_content += r"\end{itemize}" + "\n"
         
@@ -429,7 +513,6 @@ if st.button("Iniciar Evaluación Rápida (Multi-Agente Async)", type="primary")
         latex_content += r"\begin{list}{}{\setlength{\itemindent}{-1.27cm}\setlength{\leftmargin}{1.27cm}}" + "\n"
         referencias_unicas = sorted(list(set(todas_las_referencias)))
         for r in referencias_unicas:
-            # Usar \item\relax también para blindaje de listas
             latex_content += rf"  \item\relax {sanitize_ai_latex(r)}" + "\n"
         latex_content += r"\end{list}" + "\n\n"
 
