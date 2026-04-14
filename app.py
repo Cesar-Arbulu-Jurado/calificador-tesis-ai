@@ -97,8 +97,6 @@ def extract_chunks(file_bytes, chunk_size=15):
             chunk_text = ""
     return chunks
 
-sema = asyncio.Semaphore(5)
-
 async def route_thesis_sections(client, chunks, rubrics):
     from google.genai import types
     chunks_summary = ""
@@ -121,7 +119,7 @@ async def route_thesis_sections(client, chunks, rubrics):
             continue
     return {r: list(range(len(chunks))) for r in rubrics}
 
-async def map_phase_async(client, chunk_text, rubric_title, rubric_content, rigor):
+async def map_phase_async(client, chunk_text, rubric_title, rubric_content, rigor, sema):
     from google.genai import types
     prompt = f"""
     Actúa como evaluador experto de tesis. Dimensión a evaluar: {rubric_title}
@@ -141,7 +139,7 @@ async def map_phase_async(client, chunk_text, rubric_title, rubric_content, rigo
                 continue
     return []
 
-async def reduce_phase_async(client, rubric_title, rubric_content, map_results, rigor, max_errores, thesis_rules):
+async def reduce_phase_async(client, rubric_title, rubric_content, map_results, rigor, max_errores, thesis_rules, sema):
     from google.genai import types
     evidences = json.dumps(map_results)
     
@@ -177,7 +175,7 @@ async def reduce_phase_async(client, rubric_title, rubric_content, map_results, 
                 continue
     return {"observaciones_narrativas": ["Error en consolidación."], "referencias_apa": [], "puntaje": 0}
 
-async def deduplicate_phase_async(client, informe_final):
+async def deduplicate_phase_async(client, informe_final, sema):
     from google.genai import types
     prompt = f"Elimina semánticamente redundancias >= 80% criticando exactamente el mismo párrafo fundamental.\nJSON:{json.dumps(informe_final, ensure_ascii=False)}"
     modelos_dedup = ['gemini-2.5-pro', 'gemini-1.5-pro-latest']
@@ -234,6 +232,7 @@ async def verify_bibliography_agent_async(client, informe_final, logs):
     return informe
 
 async def procesar_tesis_async(client, chunks, rubrics, rubricas_db, rigor, max_obs, thesis_rules, logs):
+    sema = asyncio.Semaphore(5)
     logs("Router Base activado...")
     router_map = await route_thesis_sections(client, chunks, rubrics)
     
@@ -246,7 +245,7 @@ async def procesar_tesis_async(client, chunks, rubrics, rubricas_db, rigor, max_
             try:
                 idx = int(idx)
                 if 0 <= idx < len(chunks):
-                    map_tasks[(r, idx)] = asyncio.create_task(map_phase_async(client, chunks[idx], r, rubricas_db[r], rigor))
+                    map_tasks[(r, idx)] = asyncio.create_task(map_phase_async(client, chunks[idx], r, rubricas_db[r], rigor, sema))
             except ValueError: continue
             
     if map_tasks: await asyncio.gather(*map_tasks.values())
@@ -258,13 +257,13 @@ async def procesar_tesis_async(client, chunks, rubrics, rubricas_db, rigor, max_
         for idx in range(len(chunks)):
             if (r, idx) in map_tasks and map_tasks[(r, idx)].result():
                 all_cands.extend(map_tasks[(r, idx)].result())
-        reduce_tasks[r] = asyncio.create_task(reduce_phase_async(client, r, rubricas_db[r], all_cands, rigor, max_obs, thesis_rules))
+        reduce_tasks[r] = asyncio.create_task(reduce_phase_async(client, r, rubricas_db[r], all_cands, rigor, max_obs, thesis_rules, sema))
         
     if reduce_tasks: await asyncio.gather(*reduce_tasks.values())
     
     logs("Árbitro Semántico reduplicando...")
     inf_raw = [{"rubrica": r, "resultado": reduce_tasks[r].result()} for r in rubrics]
-    inf_final = await deduplicate_phase_async(client, inf_raw)
+    inf_final = await deduplicate_phase_async(client, inf_raw, sema)
     
     return await verify_bibliography_agent_async(client, inf_final, logs)
 
