@@ -97,7 +97,7 @@ def extract_chunks(file_bytes, chunk_size=15):
             chunk_text = ""
     return chunks
 
-async def route_thesis_sections(client, chunks, rubrics):
+async def route_thesis_sections(client, chunks, rubrics, active_models):
     from google.genai import types
     chunks_summary = ""
     for i, chunk in enumerate(chunks):
@@ -110,8 +110,7 @@ async def route_thesis_sections(client, chunks, rubrics):
     Rúbricas: {json.dumps(rubrics, ensure_ascii=False)}
     Devuelve JSON mapeando cada rúbrica con los Chunk IDs relevantes o transversales.
     """
-    fallbacks = ['gemini-2.0-flash', 'gemini-1.5-pro']
-    for m in fallbacks:
+    for m in active_models:
         try:
             res = await client.aio.models.generate_content(model=m, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
             return json.loads(res.text)
@@ -119,7 +118,7 @@ async def route_thesis_sections(client, chunks, rubrics):
             continue
     return {r: list(range(len(chunks))) for r in rubrics}
 
-async def map_phase_async(client, chunk_text, rubric_title, rubric_content, rigor, sema):
+async def map_phase_async(client, chunk_text, rubric_title, rubric_content, rigor, active_models, sema):
     from google.genai import types
     prompt = f"""
     Actúa como evaluador experto de tesis. Dimensión a evaluar: {rubric_title}
@@ -131,9 +130,8 @@ async def map_phase_async(client, chunk_text, rubric_title, rubric_content, rigo
     Retorna JSON: [{{"error_description": "...", "exact_quote": "..."}}].
     Texto:\n{chunk_text}
     """
-    modelos_map = ['gemini-2.0-flash', 'gemini-1.5-pro']
     async with sema:
-        for m in modelos_map:
+        for m in active_models:
             try:
                 res = await client.aio.models.generate_content(model=m, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
                 return json.loads(res.text) if res.text else []
@@ -141,7 +139,7 @@ async def map_phase_async(client, chunk_text, rubric_title, rubric_content, rigo
                 continue
     return []
 
-async def reduce_phase_async(client, rubric_title, rubric_content, map_results, rigor, max_errores, thesis_rules, sema):
+async def reduce_phase_async(client, rubric_title, rubric_content, map_results, rigor, max_errores, thesis_rules, active_models, sema):
     from google.genai import types
     evidences = json.dumps(map_results)
     
@@ -165,35 +163,36 @@ async def reduce_phase_async(client, rubric_title, rubric_content, map_results, 
       "puntaje": 0
     }}
     """
-    modelos_reduce = ['gemini-2.0-flash', 'gemini-1.5-pro']
-    last_error = ""
+    errores_detallados = []
     async with sema:
-        for m in modelos_reduce:
+        for m in active_models:
             try:
                 res = await client.aio.models.generate_content(model=m, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
                 parsed = json.loads(res.text)
                 if isinstance(parsed, list) and len(parsed) > 0: return parsed[0]
                 if isinstance(parsed, dict): return parsed
             except Exception as e:
-                last_error = str(e)
+                errores_detallados.append(f"({m}): {str(e)}")
                 continue
-    return {"observaciones_narrativas": [rf"Fallo crítico interno en el motor de consolidación al procesar esta rúbrica. Último Traceback capturado: \textbf{{{last_error}}}"], "referencias_apa": [], "puntaje": 0}
+                
+    error_msg = " | ".join(errores_detallados)
+    return {"observaciones_narrativas": [rf"Fallo crítico interno en el motor de consolidación al procesar esta rúbrica. Historial Exacto de Intentos Fallidos: \textbf{{{error_msg}}}"], "referencias_apa": [], "puntaje": 0}
 
-async def re_evaluate_rubric_async(client, chunks, rubric, rubric_content, rigor, max_obs, thesis_rules, sema):
+async def re_evaluate_rubric_async(client, chunks, rubric, rubric_content, rigor, max_obs, thesis_rules, active_models, sema):
     map_tasks = []
     for idx, c in enumerate(chunks):
-        map_tasks.append(asyncio.create_task(map_phase_async(client, c, rubric, rubric_content, rigor, sema)))
+        map_tasks.append(asyncio.create_task(map_phase_async(client, c, rubric, rubric_content, rigor, active_models, sema)))
     await asyncio.gather(*map_tasks)
     
     all_cands = []
     for t in map_tasks:
         if t.result(): all_cands.extend(t.result())
         
-    reduce_task = asyncio.create_task(reduce_phase_async(client, rubric, rubric_content, all_cands, rigor, max_obs, thesis_rules, sema))
+    reduce_task = asyncio.create_task(reduce_phase_async(client, rubric, rubric_content, all_cands, rigor, max_obs, thesis_rules, active_models, sema))
     await reduce_task
     return reduce_task.result()
 
-async def supervisor_agent_async(client, chunks, rubricas_db, inf_list, rigor, max_obs, thesis_rules, sema, logs):
+async def supervisor_agent_async(client, chunks, rubricas_db, inf_list, rigor, max_obs, thesis_rules, active_models, sema, logs):
     logs("Activando Agente Supervisor de Resiliencia...")
     max_intentos = 4
     for intento in range(max_intentos):
@@ -214,7 +213,7 @@ async def supervisor_agent_async(client, chunks, rubricas_db, inf_list, rigor, m
         reparaciones = {}
         for (i, rubrica) in fallos_encontrados:
             reparaciones[i] = asyncio.create_task(
-                re_evaluate_rubric_async(client, chunks, rubrica, rubricas_db[rubrica], rigor, max_obs, thesis_rules, sema)
+                re_evaluate_rubric_async(client, chunks, rubrica, rubricas_db[rubrica], rigor, max_obs, thesis_rules, active_models, sema)
             )
         
         await asyncio.gather(*reparaciones.values())
@@ -223,7 +222,7 @@ async def supervisor_agent_async(client, chunks, rubricas_db, inf_list, rigor, m
             
     return inf_list
 
-async def generate_intro_agent_async(client, chunks, rubrics_list, inf_final, logs):
+async def generate_intro_agent_async(client, chunks, rubrics_list, inf_final, active_models, logs):
     logs("Agente Analista Documental tejiendo Introducción Histórica...")
     context_inicio = "".join(chunks[:2])[:4000]
     resumen_eval = json.dumps([{"rubrica": x["rubrica"], "puntaje": x["resultado"].get("puntaje", 0)} for x in inf_final], ensure_ascii=False)
@@ -241,15 +240,16 @@ async def generate_intro_agent_async(client, chunks, rubrics_list, inf_final, lo
     Inmediatamente después, enlista brevemente los criterios evaluados y emite un preámbulo inicial advirtiendo la calidad general de la tesis basándote en los puntajes encontrados.
     Retorna EXCLUSIVAMENTE el texto crudo del párrafo, sin formateo markdown.
     """
-    try:
-        from google.genai import types
-        res = await client.aio.models.generate_content(model='gemini-2.0-flash', contents=prompt)
-        return res.text.strip()
-    except Exception as e:
-        logs(f"Falla Agente Introducción: {e}")
-        return ""
+    for m in active_models:
+        try:
+            from google.genai import types
+            res = await client.aio.models.generate_content(model=m, contents=prompt)
+            return res.text.strip()
+        except Exception:
+            continue
+    return ""
 
-async def generate_verdict_agent_async(client, inf_final, logs):
+async def generate_verdict_agent_async(client, inf_final, active_models, logs):
     logs("Magistrado Supremo Universitario invocando Veredicto...")
     data_resumen = []
     for x in inf_final:
@@ -264,20 +264,20 @@ async def generate_verdict_agent_async(client, inf_final, logs):
     2. Concluye catalogando textualmente el veredicto definitivo de la tesis en alguna de las siguientes jerarquías: Baja, Media Baja, Media Alta o Alta Calidad.
     Retorna EXCLUSIVAMENTE el texto crudo del párrafo del Veredicto, sin listados de viñetas, sin markdown.
     """
-    try:
-        from google.genai import types
-        res = await client.aio.models.generate_content(model='gemini-2.0-flash', contents=prompt)
-        return res.text.strip()
-    except Exception as e:
-        logs(f"Falla Magistrado Punitivo: {e}")
-        return ""
+    for m in active_models:
+        try:
+            from google.genai import types
+            res = await client.aio.models.generate_content(model=m, contents=prompt)
+            return res.text.strip()
+        except Exception:
+            continue
+    return ""
 
-async def deduplicate_phase_async(client, informe_final, sema):
+async def deduplicate_phase_async(client, informe_final, active_models, sema):
     from google.genai import types
     prompt = f"Elimina semánticamente redundancias >= 80% criticando exactamente el mismo párrafo fundamental.\nJSON:{json.dumps(informe_final, ensure_ascii=False)}"
-    modelos_dedup = ['gemini-2.0-flash', 'gemini-1.5-pro']
     async with sema:
-        for m in modelos_dedup:
+        for m in active_models:
             try:
                 res = await client.aio.models.generate_content(model=m, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
                 parsed = json.loads(res.text)
@@ -286,7 +286,7 @@ async def deduplicate_phase_async(client, informe_final, sema):
                 continue
     return informe_final
 
-async def url_is_valid_and_matches(ref, client):
+async def url_is_valid_and_matches(ref, client, active_models):
     url_match = re.search(r'\\url\{([^}]+)\}', ref) or re.search(r'(https?://[^\s]+)', ref)
     if not url_match: return ref
     url = url_match.group(1)
@@ -304,12 +304,16 @@ async def url_is_valid_and_matches(ref, client):
         text_preview = soup.get_text()[:300].replace('\n', ' ')
         
         prompt = f"Referencia: {ref}\nURL Título: {title}\nPreview Web: {text_preview}\n¿Corresponden semánticamente? Responde 'VALIDO' o 'FALSO'."
-        res = await client.aio.models.generate_content(model='gemini-2.0-flash', contents=prompt)
-        return None if "FALSO" in res.text.upper() else ref
+        for m in active_models:
+            try:
+                res = await client.aio.models.generate_content(model=m, contents=prompt)
+                return None if "FALSO" in res.text.upper() else ref
+            except Exception: continue
+        return ref
     except Exception:
         return ref
 
-async def semantic_deduplicate_references_async(client, refs, logs):
+async def semantic_deduplicate_references_async(client, refs, active_models, logs):
     if not refs: return []
     logs("Activando Agente Deduplicador Bibliográfico Global...")
     prompt = f"""
@@ -319,15 +323,16 @@ async def semantic_deduplicate_references_async(client, refs, logs):
     Misión: Deduplica las variaciones del mismo paper (e.g. si está la versión completa con DOI/Edition y otra incompleta, desecha la incompleta y mantén la completa). 
     Retorna un JSON estricto con un único array final destilado de cadenas APA: ["Ref Mejorada 1", "Ref Mejorada 2"].
     """
-    try:
-        from google.genai import types
-        res = await client.aio.models.generate_content(model='gemini-2.0-flash', contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
-        return json.loads(res.text)
-    except Exception as e:
-        logs(f"Falla en deduplicación semántica bibliográfica: {e}")
-        return sorted(list(set(refs)))
+    for m in active_models:
+        try:
+            from google.genai import types
+            res = await client.aio.models.generate_content(model=m, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
+            return json.loads(res.text)
+        except Exception:
+            continue
+    return sorted(list(set(refs)))
 
-async def verify_bibliography_agent_async(client, informe_final, logs):
+async def verify_bibliography_agent_async(client, informe_final, active_models, logs):
     logs("Inquisidor: Verificando literatura en la Deep Web...")
     import copy
     informe = copy.deepcopy(informe_final)
@@ -335,7 +340,7 @@ async def verify_bibliography_agent_async(client, informe_final, logs):
     for i, item in enumerate(informe):
         for j, ref in enumerate(item.get('resultado', {}).get('referencias_apa', [])):
             mapping.append((i, j))
-            verifications.append(url_is_valid_and_matches(ref, client))
+            verifications.append(url_is_valid_and_matches(ref, client, active_models))
     if verifications:
         r = await asyncio.gather(*verifications)
         for (i, j), v in zip(mapping, r):
@@ -346,10 +351,10 @@ async def verify_bibliography_agent_async(client, informe_final, logs):
             res['referencias_apa'] = [r for r in res['referencias_apa'] if r is not None]
     return informe
 
-async def procesar_tesis_async(client, chunks, rubrics, rubricas_db, rigor, max_obs, thesis_rules, logs):
+async def procesar_tesis_async(client, chunks, rubrics, rubricas_db, rigor, max_obs, thesis_rules, active_models, logs):
     sema = asyncio.Semaphore(5)
     logs("Router Base activado...")
-    router_map = await route_thesis_sections(client, chunks, rubrics)
+    router_map = await route_thesis_sections(client, chunks, rubrics, active_models)
     
     logs("Phase MAP paralela instanciada...")
     map_tasks = {}
@@ -360,7 +365,7 @@ async def procesar_tesis_async(client, chunks, rubrics, rubricas_db, rigor, max_
             try:
                 idx = int(idx)
                 if 0 <= idx < len(chunks):
-                    map_tasks[(r, idx)] = asyncio.create_task(map_phase_async(client, chunks[idx], r, rubricas_db[r], rigor, sema))
+                    map_tasks[(r, idx)] = asyncio.create_task(map_phase_async(client, chunks[idx], r, rubricas_db[r], rigor, active_models, sema))
             except ValueError: continue
             
     if map_tasks: await asyncio.gather(*map_tasks.values())
@@ -372,28 +377,28 @@ async def procesar_tesis_async(client, chunks, rubrics, rubricas_db, rigor, max_
         for idx in range(len(chunks)):
             if (r, idx) in map_tasks and map_tasks[(r, idx)].result():
                 all_cands.extend(map_tasks[(r, idx)].result())
-        reduce_tasks[r] = asyncio.create_task(reduce_phase_async(client, r, rubricas_db[r], all_cands, rigor, max_obs, thesis_rules, sema))
+        reduce_tasks[r] = asyncio.create_task(reduce_phase_async(client, r, rubricas_db[r], all_cands, rigor, max_obs, thesis_rules, active_models, sema))
         
     if reduce_tasks: await asyncio.gather(*reduce_tasks.values())
     
     inf_raw = [{"rubrica": r, "resultado": reduce_tasks[r].result()} for r in rubrics]
     
-    inf_raw = await supervisor_agent_async(client, chunks, rubricas_db, inf_raw, rigor, max_obs, thesis_rules, sema, logs)
+    inf_raw = await supervisor_agent_async(client, chunks, rubricas_db, inf_raw, rigor, max_obs, thesis_rules, active_models, sema, logs)
     
     logs("Árbitro Semántico reduplicando...")
-    inf_final = await deduplicate_phase_async(client, inf_raw, sema)
+    inf_final = await deduplicate_phase_async(client, inf_raw, active_models, sema)
     
-    inf_final = await verify_bibliography_agent_async(client, inf_final, logs)
+    inf_final = await verify_bibliography_agent_async(client, inf_final, active_models, logs)
     
     logs("Recolectando bibliografía maestra de todos los nodos...")
     all_raw_refs = []
     for r in inf_final:
         all_raw_refs.extend(r.get('resultado', {}).get('referencias_apa', []))
         
-    unique_refs = await semantic_deduplicate_references_async(client, all_raw_refs, logs)
+    unique_refs = await semantic_deduplicate_references_async(client, all_raw_refs, active_models, logs)
     
-    texto_intro = await generate_intro_agent_async(client, chunks, rubrics, inf_final, logs)
-    texto_veredicto = await generate_verdict_agent_async(client, inf_final, logs)
+    texto_intro = await generate_intro_agent_async(client, chunks, rubrics, inf_final, active_models, logs)
+    texto_veredicto = await generate_verdict_agent_async(client, inf_final, active_models, logs)
     
     return inf_final, unique_refs, texto_intro, texto_veredicto
 
@@ -404,6 +409,34 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     os.environ["GEMINI_API_KEY"] = api_key
     client = genai.Client(api_key=api_key)
     
+    # ------------------ NUEVO AGENTE EXPLORADOR ------------------
+    daemon_log("Agente Identificador de Modelos activado...")
+    try:
+        raw_list = client.models.list()
+        disponibles = []
+        for m in raw_list:
+            if hasattr(m, 'name'):
+                name_clean = m.name.replace("models/", "")
+                if 'gemini' in name_clean and 'vision' not in name_clean:
+                    disponibles.append(name_clean)
+                    
+        active_models_filtered = []
+        for pref in ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']:
+            if pref in disponibles:
+                active_models_filtered.append(pref)
+                
+        if not active_models_filtered and disponibles:
+            active_models_filtered.append(disponibles[0])
+            
+        if not active_models_filtered:
+            active_models_filtered = ['gemini-1.5-flash'] # hardcore fallback final
+            
+        daemon_log(f"Modelos confirmados que SI EXISTEN en tu entorno: {active_models_filtered}")
+    except Exception as e:
+        daemon_log(f"Falla en Explorador de Modelos. Forzando base. Trace: {e}")
+        active_models_filtered = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+    # -------------------------------------------------------------
+    
     chunks = extract_chunks(file_bytes, chunk_size=15)
     
     loop = asyncio.new_event_loop()
@@ -411,7 +444,7 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     
     try:
         informe_verificado, referencias_consolidadas, texto_intro, texto_veredicto = loop.run_until_complete(
-            procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, rigor_val, max_obs, thesis_rules, daemon_log)
+            procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, rigor_val, max_obs, thesis_rules, active_models_filtered, daemon_log)
         )
     except Exception as e:
         daemon_log(f"CRITICAL ASYNC ERROR: {e}")
