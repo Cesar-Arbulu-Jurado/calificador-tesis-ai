@@ -110,7 +110,7 @@ async def route_thesis_sections(client, chunks, rubrics):
     Rúbricas: {json.dumps(rubrics, ensure_ascii=False)}
     Devuelve JSON mapeando cada rúbrica con los Chunk IDs relevantes o transversales.
     """
-    fallbacks = ['gemini-2.0-flash', 'gemini-1.5-flash']
+    fallbacks = ['gemini-2.0-flash', 'gemini-1.5-pro']
     for m in fallbacks:
         try:
             res = await client.aio.models.generate_content(model=m, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
@@ -131,7 +131,7 @@ async def map_phase_async(client, chunk_text, rubric_title, rubric_content, rigo
     Retorna JSON: [{{"error_description": "...", "exact_quote": "..."}}].
     Texto:\n{chunk_text}
     """
-    modelos_map = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+    modelos_map = ['gemini-2.0-flash', 'gemini-1.5-pro']
     async with sema:
         for m in modelos_map:
             try:
@@ -165,7 +165,7 @@ async def reduce_phase_async(client, rubric_title, rubric_content, map_results, 
       "puntaje": 0
     }}
     """
-    modelos_reduce = ['gemini-2.0-pro-exp-02-05', 'gemini-2.5-pro', 'gemini-1.5-pro', 'gemini-1.5-flash']
+    modelos_reduce = ['gemini-2.0-flash', 'gemini-1.5-pro']
     last_error = ""
     async with sema:
         for m in modelos_reduce:
@@ -275,7 +275,7 @@ async def generate_verdict_agent_async(client, inf_final, logs):
 async def deduplicate_phase_async(client, informe_final, sema):
     from google.genai import types
     prompt = f"Elimina semánticamente redundancias >= 80% criticando exactamente el mismo párrafo fundamental.\nJSON:{json.dumps(informe_final, ensure_ascii=False)}"
-    modelos_dedup = ['gemini-2.0-pro-exp-02-05', 'gemini-1.5-pro', 'gemini-2.0-flash', 'gemini-1.5-flash']
+    modelos_dedup = ['gemini-2.0-flash', 'gemini-1.5-pro']
     async with sema:
         for m in modelos_dedup:
             try:
@@ -304,7 +304,7 @@ async def url_is_valid_and_matches(ref, client):
         text_preview = soup.get_text()[:300].replace('\n', ' ')
         
         prompt = f"Referencia: {ref}\nURL Título: {title}\nPreview Web: {text_preview}\n¿Corresponden semánticamente? Responde 'VALIDO' o 'FALSO'."
-        res = await client.aio.models.generate_content(model='gemini-1.5-flash', contents=prompt)
+        res = await client.aio.models.generate_content(model='gemini-2.0-flash', contents=prompt)
         return None if "FALSO" in res.text.upper() else ref
     except Exception:
         return ref
@@ -321,7 +321,7 @@ async def semantic_deduplicate_references_async(client, refs, logs):
     """
     try:
         from google.genai import types
-        res = await client.aio.models.generate_content(model='gemini-1.5-flash', contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
+        res = await client.aio.models.generate_content(model='gemini-2.0-flash', contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
         return json.loads(res.text)
     except Exception as e:
         logs(f"Falla en deduplicación semántica bibliográfica: {e}")
