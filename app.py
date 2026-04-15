@@ -110,7 +110,7 @@ async def route_thesis_sections(client, chunks, rubrics):
     Rúbricas: {json.dumps(rubrics, ensure_ascii=False)}
     Devuelve JSON mapeando cada rúbrica con los Chunk IDs relevantes o transversales.
     """
-    fallbacks = ['gemini-1.5-flash', 'gemini-2.5-flash']
+    fallbacks = ['gemini-2.0-flash', 'gemini-1.5-flash']
     for m in fallbacks:
         try:
             res = await client.aio.models.generate_content(model=m, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
@@ -131,7 +131,7 @@ async def map_phase_async(client, chunk_text, rubric_title, rubric_content, rigo
     Retorna JSON: [{{"error_description": "...", "exact_quote": "..."}}].
     Texto:\n{chunk_text}
     """
-    modelos_map = ['gemini-3-flash-preview', 'gemini-3-flash', 'gemini-2.5-flash', 'gemini-1.5-flash-latest']
+    modelos_map = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
     async with sema:
         for m in modelos_map:
             try:
@@ -165,7 +165,7 @@ async def reduce_phase_async(client, rubric_title, rubric_content, map_results, 
       "puntaje": 0
     }}
     """
-    modelos_reduce = ['gemini-3-pro-preview', 'gemini-3-pro', 'gemini-2.5-pro', 'gemini-1.5-pro-latest']
+    modelos_reduce = ['gemini-2.0-pro-exp-02-05', 'gemini-2.5-pro', 'gemini-1.5-pro', 'gemini-1.5-flash']
     last_error = ""
     async with sema:
         for m in modelos_reduce:
@@ -179,10 +179,103 @@ async def reduce_phase_async(client, rubric_title, rubric_content, map_results, 
                 continue
     return {"observaciones_narrativas": [rf"Fallo crítico interno en el motor de consolidación al procesar esta rúbrica. Último Traceback capturado: \textbf{{{last_error}}}"], "referencias_apa": [], "puntaje": 0}
 
+async def re_evaluate_rubric_async(client, chunks, rubric, rubric_content, rigor, max_obs, thesis_rules, sema):
+    map_tasks = []
+    for idx, c in enumerate(chunks):
+        map_tasks.append(asyncio.create_task(map_phase_async(client, c, rubric, rubric_content, rigor, sema)))
+    await asyncio.gather(*map_tasks)
+    
+    all_cands = []
+    for t in map_tasks:
+        if t.result(): all_cands.extend(t.result())
+        
+    reduce_task = asyncio.create_task(reduce_phase_async(client, rubric, rubric_content, all_cands, rigor, max_obs, thesis_rules, sema))
+    await reduce_task
+    return reduce_task.result()
+
+async def supervisor_agent_async(client, chunks, rubricas_db, inf_list, rigor, max_obs, thesis_rules, sema, logs):
+    logs("Activando Agente Supervisor de Resiliencia...")
+    max_intentos = 4
+    for intento in range(max_intentos):
+        fallos_encontrados = []
+        for i, item in enumerate(inf_list):
+            rubrica = item['rubrica']
+            obs = item.get('resultado', {}).get('observaciones_narrativas', [])
+            is_failed = any("Fallo crítico interno" in str(o) for o in obs)
+            if is_failed:
+                fallos_encontrados.append((i, rubrica))
+        
+        if not fallos_encontrados:
+            return inf_list
+            
+        logs(f"Supervisor detectó {len(fallos_encontrados)} rúbricas corruptas. Iniciando Intento Reparador {intento+1} de {max_intentos}...")
+        await asyncio.sleep(4)
+        
+        reparaciones = {}
+        for (i, rubrica) in fallos_encontrados:
+            reparaciones[i] = asyncio.create_task(
+                re_evaluate_rubric_async(client, chunks, rubrica, rubricas_db[rubrica], rigor, max_obs, thesis_rules, sema)
+            )
+        
+        await asyncio.gather(*reparaciones.values())
+        for i, task in reparaciones.items():
+            inf_list[i]['resultado'] = task.result()
+            
+    return inf_list
+
+async def generate_intro_agent_async(client, chunks, rubrics_list, inf_final, logs):
+    logs("Agente Analista Documental tejiendo Introducción Histórica...")
+    context_inicio = "".join(chunks[:2])[:4000]
+    resumen_eval = json.dumps([{"rubrica": x["rubrica"], "puntaje": x["resultado"].get("puntaje", 0)} for x in inf_final], ensure_ascii=False)
+    
+    prompt = f"""
+    Eres el Analista Documental de Tesis.
+    Páginas iniciales de la obra:
+    {context_inicio}
+    
+    Rúbricas analizadas: {', '.join(rubrics_list)}.
+    Resumen de dictamen interno: {resumen_eval}.
+    
+    Escribe UN ÚNICO PÁRRAFO continuo (entre 6 y 10 líneas) usando exactamente esta apertura literal obligatoria:
+    "La presente evaluación se ha aplicado a la tesis denominada [Escribe aquí el Título de la tesis deducido del texto], de [Escribe el Autor o Autores]."
+    Inmediatamente después, enlista brevemente los criterios evaluados y emite un preámbulo inicial advirtiendo la calidad general de la tesis basándote en los puntajes encontrados.
+    Retorna EXCLUSIVAMENTE el texto crudo del párrafo, sin formateo markdown.
+    """
+    try:
+        from google.genai import types
+        res = await client.aio.models.generate_content(model='gemini-2.0-flash', contents=prompt)
+        return res.text.strip()
+    except Exception as e:
+        logs(f"Falla Agente Introducción: {e}")
+        return ""
+
+async def generate_verdict_agent_async(client, inf_final, logs):
+    logs("Magistrado Supremo Universitario invocando Veredicto...")
+    data_resumen = []
+    for x in inf_final:
+        data_resumen.append({"rubrica": x["rubrica"], "observaciones": x["resultado"].get("observaciones_narrativas", [])})
+        
+    prompt = f"""
+    Eres el Magistrado Supremo Universitario. Analiza la totalidad del dictamen generado:
+    {json.dumps(data_resumen, ensure_ascii=False)}
+    
+    Escribe UN ÚNICO PÁRRAFO continuo y rotundo (de 6 a 8 líneas) realizando un sumario rápido de destrucción.
+    1. Menciona unificados los errores de fondo más severos y castigados del documento global.
+    2. Concluye catalogando textualmente el veredicto definitivo de la tesis en alguna de las siguientes jerarquías: Baja, Media Baja, Media Alta o Alta Calidad.
+    Retorna EXCLUSIVAMENTE el texto crudo del párrafo del Veredicto, sin listados de viñetas, sin markdown.
+    """
+    try:
+        from google.genai import types
+        res = await client.aio.models.generate_content(model='gemini-2.0-flash', contents=prompt)
+        return res.text.strip()
+    except Exception as e:
+        logs(f"Falla Magistrado Punitivo: {e}")
+        return ""
+
 async def deduplicate_phase_async(client, informe_final, sema):
     from google.genai import types
     prompt = f"Elimina semánticamente redundancias >= 80% criticando exactamente el mismo párrafo fundamental.\nJSON:{json.dumps(informe_final, ensure_ascii=False)}"
-    modelos_dedup = ['gemini-2.5-pro', 'gemini-1.5-pro-latest']
+    modelos_dedup = ['gemini-2.0-pro-exp-02-05', 'gemini-1.5-pro', 'gemini-2.0-flash', 'gemini-1.5-flash']
     async with sema:
         for m in modelos_dedup:
             try:
@@ -283,8 +376,11 @@ async def procesar_tesis_async(client, chunks, rubrics, rubricas_db, rigor, max_
         
     if reduce_tasks: await asyncio.gather(*reduce_tasks.values())
     
-    logs("Árbitro Semántico reduplicando...")
     inf_raw = [{"rubrica": r, "resultado": reduce_tasks[r].result()} for r in rubrics]
+    
+    inf_raw = await supervisor_agent_async(client, chunks, rubricas_db, inf_raw, rigor, max_obs, thesis_rules, sema, logs)
+    
+    logs("Árbitro Semántico reduplicando...")
     inf_final = await deduplicate_phase_async(client, inf_raw, sema)
     
     inf_final = await verify_bibliography_agent_async(client, inf_final, logs)
@@ -295,7 +391,11 @@ async def procesar_tesis_async(client, chunks, rubrics, rubricas_db, rigor, max_
         all_raw_refs.extend(r.get('resultado', {}).get('referencias_apa', []))
         
     unique_refs = await semantic_deduplicate_references_async(client, all_raw_refs, logs)
-    return inf_final, unique_refs
+    
+    texto_intro = await generate_intro_agent_async(client, chunks, rubrics, inf_final, logs)
+    texto_veredicto = await generate_verdict_agent_async(client, inf_final, logs)
+    
+    return inf_final, unique_refs, texto_intro, texto_veredicto
 
 def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max_obs, thesis_rules, api_key, evaluator_name, evaluator_role, university, correo_destino, app_secrets):
     def daemon_log(msg): print(f"[DAEMON] {msg}")
@@ -310,7 +410,7 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     asyncio.set_event_loop(loop)
     
     try:
-        informe_verificado, referencias_consolidadas = loop.run_until_complete(
+        informe_verificado, referencias_consolidadas, texto_intro, texto_veredicto = loop.run_until_complete(
             procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, rigor_val, max_obs, thesis_rules, daemon_log)
         )
     except Exception as e:
@@ -371,6 +471,9 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     latex_content += rf"\textbf{{Rol:}} {escape_user_data(evaluator_role)}\\" + "\n"
     latex_content += rf"\textbf{{Institución:}} {escape_user_data(university)}\\" + "\n\n"
     latex_content += r"\hrule\vspace{0.5cm}" + "\n\n"
+    
+    if texto_intro:
+        latex_content += rf"\noindent {sanitize_ai_latex(texto_intro)}" + "\n\n\\vspace{0.5cm}\n\n"
 
     for item in informe_verificado:
         res = item['resultado']
@@ -384,6 +487,10 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
                 latex_content += rf"  \item\relax {sanitize_ai_latex(obs)}" + "\n"
             latex_content += r"\end{itemize}" + "\n"
         latex_content += r"\vspace{0.5cm}" + "\n\n"
+        
+    if texto_veredicto:
+        latex_content += r"\subsubsection*{Veredicto Integral}" + "\n"
+        latex_content += rf"\noindent {sanitize_ai_latex(texto_veredicto)}" + "\n\n\\vspace{0.5cm}\n\n"
 
     if referencias_consolidadas:
         latex_content += r"\newpage\section*{Referencias Bibliográficas Consolidadas}" + "\n"
