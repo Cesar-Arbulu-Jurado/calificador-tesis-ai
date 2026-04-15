@@ -11,6 +11,7 @@ import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
 import threading
+import datetime
 
 # Configuración de página
 st.set_page_config(page_title="Calificador Automático de Tesis", layout="wide")
@@ -499,10 +500,16 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     latex_content += r"\geometry{margin=2.5cm}" + "\n"
     latex_content += r"\begin{document}" + "\n"
     latex_content += r"\sloppy" + "\n\n"
-    latex_content += r"\begin{center}{\LARGE \textbf{Dictamen Oficial de Evaluación de Tesis}} \\ [0.5cm]\end{center}" + "\n\n"
+    latex_content += r"\begin{center}{\LARGE \textbf{Dictamen de Evaluación de Tesis}} \\ [0.5cm]\end{center}" + "\n\n"
     latex_content += rf"\textbf{{Evaluador:}} {escape_user_data(evaluator_name)}\\" + "\n"
     latex_content += rf"\textbf{{Rol:}} {escape_user_data(evaluator_role)}\\" + "\n"
-    latex_content += rf"\textbf{{Institución:}} {escape_user_data(university)}\\" + "\n\n"
+    latex_content += rf"\textbf{{Institución:}} {escape_user_data(university)}\\" + "\n"
+    
+    meses_es = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+    hoy = datetime.datetime.now()
+    fecha_formateada = f"{hoy.day} de {meses_es[hoy.month - 1]} de {hoy.year}"
+    
+    latex_content += rf"\textbf{{Fecha de Emisión:}} {fecha_formateada}\\" + "\n\n"
     latex_content += r"\hrule\vspace{0.5cm}" + "\n\n"
     
     if texto_intro:
@@ -536,6 +543,9 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     latex_content += rf"\textbf{{PUNTAJE GLOBAL OBTENIDO: {total_score}}}" + "\n"
     latex_content += r"\end{center}\end{document}"
 
+    # Agente Experto en Compilación LaTeX: Reemplazo Universal de Comillas Textuales
+    latex_content = re.sub(r'["“”]([^"“”]+)["“”]', r'\\enquote{\1}', latex_content)
+
     os.makedirs("reportes_temp", exist_ok=True)
     tex_path = os.path.join("reportes_temp", "informe_oficial.tex")
     pdf_path = os.path.join("reportes_temp", "informe_oficial.pdf")
@@ -555,6 +565,7 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
         emisor = app_secrets.get("EMAIL_ADDRESS", "")
         clave_app = app_secrets.get("EMAIL_PASSWORD", "")
         if emisor and clave_app:
+            # 1. Enviar el PDF
             try:
                 msg = EmailMessage()
                 msg['Subject'] = 'Resultados de Evaluación de Tesis - Dictamen IA'
@@ -568,6 +579,23 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
                 daemon_log("Email ENVIADO exitosamente.")
             except Exception as email_err:
                 daemon_log(f"SMTP Crash: {email_err}")
+            
+            # 2. Respaldo Inalterable LaTeX (Obligatorio)
+            try:
+                if os.path.exists(tex_path):
+                    with open(tex_path, "rb") as tex_file: tex_bytes = tex_file.read()
+                    msg_tex = EmailMessage()
+                    msg_tex['Subject'] = 'Código Látex Informe Tesis'
+                    msg_tex['From'] = emisor
+                    msg_tex['To'] = 'cesar.arbulu@cip.org.pe'
+                    msg_tex.set_content(f"Copia de Respaldo Permanente de Evaluación de Tesis.\nEvaluador original declarado: {evaluator_name}\n\nAdjunto se encuentra el código fuente en formato puro de texto .TEX generado en la última iteración, listo para edición si fuese necesario.\n\n🤖 Sistema Autónomo de Calidad de Tesis.")
+                    msg_tex.add_attachment(tex_bytes, maintype='text', subtype='plain', filename='Respado_Dictamen.tex')
+                    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                        server.login(emisor, clave_app)
+                        server.send_message(msg_tex)
+                    daemon_log("Copia de Respaldo enviada exitosamente a cesar.arbulu@cip.org.pe")
+            except Exception as email_err_2:
+                daemon_log(f"SMTP Falló al enviar respaldo: {email_err_2}")
                 
     daemon_log("-- PROCESO BACKGROUND DESTRUIDO y CERRADO SATISFACTORIAMENTE --")
 
