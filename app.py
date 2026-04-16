@@ -488,60 +488,68 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
         if text.count('$') % 2 != 0: text += '$'
         return text
 
-    latex_content = r"\documentclass[12pt,a4paper]{article}" + "\n"
-    latex_content += r"\usepackage[utf8]{inputenc}" + "\n"
-    latex_content += r"\usepackage[T1]{fontenc}" + "\n"
-    latex_content += r"\usepackage[spanish]{babel}" + "\n"
-    latex_content += r"\usepackage[spanish]{csquotes}" + "\n"
-    latex_content += r"\usepackage{geometry}" + "\n"
-    latex_content += r"\usepackage{xcolor}" + "\n"
-    latex_content += r"\usepackage{microtype}" + "\n"
-    latex_content += r"\usepackage[colorlinks=true,urlcolor=blue,linkcolor=black,citecolor=black]{hyperref}" + "\n"
-    latex_content += r"\geometry{margin=2.5cm}" + "\n"
-    latex_content += r"\begin{document}" + "\n"
-    latex_content += r"\sloppy" + "\n\n"
-    latex_content += r"\begin{center}{\LARGE \textbf{Dictamen de Evaluación de Tesis}} \\ [0.5cm]\end{center}" + "\n\n"
-    latex_content += rf"\textbf{{Evaluador:}} {escape_user_data(evaluator_name)}\\" + "\n"
-    latex_content += rf"\textbf{{Rol:}} {escape_user_data(evaluator_role)}\\" + "\n"
-    latex_content += rf"\textbf{{Institución:}} {escape_user_data(university)}\\" + "\n"
-    
+    # === TEMPLATE RENDERING LOGIC ===
+    template_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "report_template.tex")
+    if not os.path.exists(template_path):
+        template_path = os.path.join(os.path.dirname(__file__), "report_template.tex")
+        
+    try:
+        with open(template_path, 'r', encoding='utf-8') as f:
+            template_text = f.read()
+    except Exception as e:
+        daemon_log(f"Error loading report_template.tex: {e}")
+        template_text = r"\documentclass{article}\begin{document}Error grave: report_template.tex no encontrado.\end{document}"
+
     meses_es = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+    import datetime
     hoy = datetime.datetime.now()
     fecha_formateada = f"{hoy.day} de {meses_es[hoy.month - 1]} de {hoy.year}"
-    
-    latex_content += rf"\textbf{{Fecha de Emisión:}} {fecha_formateada}\\" + "\n\n"
-    latex_content += r"\hrule\vspace{0.5cm}" + "\n\n"
-    
-    if texto_intro:
-        latex_content += rf"\noindent {sanitize_ai_latex(texto_intro)}" + "\n\n\\vspace{0.5cm}\n\n"
 
-    for item in informe_verificado:
-        res = item['resultado']
-        rubrica_esc = escape_user_data(item['rubrica'])
-        puntaje = res.get('puntaje', 0)
-        latex_content += rf"\subsection*{{{rubrica_esc} (Puntaje Asignado: {puntaje})}}" + "\n"
-        observaciones = res.get('observaciones_narrativas', [])
-        if observaciones:
-            latex_content += r"\begin{itemize}" + "\n"
-            for obs in observaciones:
-                latex_content += rf"  \item\relax {sanitize_ai_latex(obs)}" + "\n"
-            latex_content += r"\end{itemize}" + "\n"
-        latex_content += r"\vspace{0.5cm}" + "\n\n"
-        
-    if texto_veredicto:
-        latex_content += r"\subsubsection*{Veredicto Integral}" + "\n"
-        latex_content += rf"\noindent {sanitize_ai_latex(texto_veredicto)}" + "\n\n\\vspace{0.5cm}\n\n"
+    # Global Replacements
+    latex_content = template_text
+    latex_content = latex_content.replace('{{EVALUADOR}}', escape_user_data(evaluator_name))
+    latex_content = latex_content.replace('{{ROL}}', escape_user_data(evaluator_role))
+    latex_content = latex_content.replace('{{INSTITUCION}}', escape_user_data(university))
+    latex_content = latex_content.replace('{{FECHA}}', fecha_formateada)
+    latex_content = latex_content.replace('{{TEXTO_INTRO_IA}}', sanitize_ai_latex(texto_intro))
+    latex_content = latex_content.replace('{{VEREDICTO_IA}}', sanitize_ai_latex(texto_veredicto))
+    latex_content = latex_content.replace('{{PUNTAJE_TOTAL_IA}}', str(total_score))
 
+    refs_str = ""
     if referencias_consolidadas:
-        latex_content += r"\newpage\section*{Referencias Bibliográficas Consolidadas}" + "\n"
-        latex_content += r"\begin{list}{}{\setlength{\itemindent}{-1.27cm}\setlength{\leftmargin}{1.27cm}}" + "\n"
         for r in referencias_consolidadas:
-            latex_content += rf"  \item\relax {sanitize_ai_latex(r)}" + "\n"
-        latex_content += r"\end{list}" + "\n\n"
+            refs_str += rf"  \item\relax {sanitize_ai_latex(r)}" + "\n"
+    latex_content = latex_content.replace('{{REFERENCIAS_IA}}', refs_str)
 
-    latex_content += r"\vfill\hrule\vspace{0.2cm}\begin{center}" + "\n"
-    latex_content += rf"\textbf{{PUNTAJE GLOBAL OBTENIDO: {total_score}}}" + "\n"
-    latex_content += r"\end{center}\end{document}"
+    # Process Sections
+    dict_resultados = {item['rubrica']: item['resultado'] for item in informe_verificado}
+    
+    for rubric_title in rubricas_db.keys():
+        escaped_title = re.escape(rubric_title)
+        is_evaluated = rubric_title in dict_resultados
+        
+        if not is_evaluated:
+            # Eliminar la sección entera y su preámbulo si no se evaluó
+            pattern = r"\\section\{" + escaped_title + r"\}.*?\{\{OBSERVACIONES_AQUI\}\}\s*"
+            latex_content = re.sub(pattern, "", latex_content, flags=re.DOTALL)
+        else:
+            res = dict_resultados[rubric_title]
+            puntaje = res.get('puntaje', 0)
+            
+            # Update title to include puntaje
+            title_patt = r"\\section\{" + escaped_title + r"\}"
+            latex_content = re.sub(title_patt, rf"\\section{{{escape_user_data(rubric_title)} (Puntaje Asignado: {puntaje})}}", latex_content, count=1)
+            
+            # Build and inject observaciones
+            obs_str = ""
+            observaciones = res.get('observaciones_narrativas', [])
+            if observaciones:
+                obs_str += r"\begin{itemize}" + "\n"
+                for obs in observaciones:
+                    obs_str += rf"  \item\relax {sanitize_ai_latex(obs)}" + "\n"
+                obs_str += r"\end{itemize}" + "\n"
+            
+            latex_content = latex_content.replace('{{OBSERVACIONES_AQUI}}', obs_str, 1)
 
     # Agente Experto en Compilación LaTeX: Reemplazo Universal de Comillas Textuales
     latex_content = re.sub(r'["“”]([^"“”]+)["“”]', r'\\enquote{\1}', latex_content)
