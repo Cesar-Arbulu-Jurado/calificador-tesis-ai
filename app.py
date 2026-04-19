@@ -98,6 +98,63 @@ def extract_chunks(file_bytes, chunk_size=15):
             chunk_text = ""
     return chunks
 
+
+async def resilient_gemini_call(client, active_models, contents, config=None, is_json=False):
+    import json
+    import re
+    import asyncio
+    
+    def robust_json_parse(text):
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+            
+        try:
+            # Try to strip markdown quotes
+            clean_text = text.strip()
+            if clean_text.startswith("```json"):
+                clean_text = clean_text[7:]
+            elif clean_text.startswith("```"):
+                clean_text = clean_text[3:]
+            if clean_text.endswith("```"):
+                clean_text = clean_text[:-3]
+            clean_text = clean_text.strip()
+            return json.loads(clean_text)
+        except: pass
+        
+        try:
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            if match: return json.loads(match.group(0))
+        except: pass
+        try:
+            match = re.search(r'\[.*\]', text, re.DOTALL)
+            if match: return json.loads(match.group(0))
+        except: pass
+        raise Exception("JSON corrupto o incompleto devuelto de la API.")
+
+    last_error = ""
+    for m in active_models:
+        intentos = 3
+        for i in range(intentos):
+            try:
+                res = await client.aio.models.generate_content(model=m, contents=contents, config=config)
+                if not res.text: raise Exception("Bloque vacío API")
+                
+                if is_json:
+                    parsed = robust_json_parse(res.text)
+                    return parsed, None
+                return res.text, None
+                
+            except Exception as e:
+                last_error = f"({m}): {str(e)}"
+                if "503" in str(e) or "429" in str(e) or "quota" in str(e).lower():
+                    await asyncio.sleep(5 * (i + 1))
+                    continue
+                else:
+                    break # Failed syntax or 404, go next model
+    return None, str(last_error)
+
 async def route_thesis_sections(client, chunks, rubrics, active_models):
     from google.genai import types
     chunks_summary = ""
@@ -111,39 +168,32 @@ async def route_thesis_sections(client, chunks, rubrics, active_models):
     Rúbricas: {json.dumps(rubrics, ensure_ascii=False)}
     Devuelve JSON mapeando cada rúbrica con los Chunk IDs relevantes o transversales.
     """
-    for m in active_models:
-        try:
-            res = await client.aio.models.generate_content(model=m, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
-            return json.loads(res.text)
-        except Exception:
-            continue
+    from google.genai import types
+    parsed, err = await resilient_gemini_call(client, active_models, prompt, config=types.GenerateContentConfig(response_mime_type="application/json"), is_json=True)
+    if parsed: return parsed
     return {r: list(range(len(chunks))) for r in rubrics}
 
 async def map_phase_async(client, chunk_text, rubric_title, rubric_content, rigor, active_models, sema):
-    from google.genai import types
     prompt = f"""
     Actúa como evaluador experto de tesis. Dimensión a evaluar: {rubric_title}
     CRITERIOS INALTERABLES:
     {rubric_content}
     
     PROSCRIPCIÓN SUPREMA: Jamás extraigas evidencias que justifiquen hallazgos mencionando a metodólogos de ciencias sociales en español (ej. Hernández Sampieri). Están prohibidos y vetados en Ingeniería Civil.
-    Si hallas un error, extrae la cita EXACTA enmarcada en comillas ("...").
-    Retorna JSON: [{{"error_description": "...", "exact_quote": "..."}}].
+    REGLA DE OCR (ERROR DE ORIGEN): Si encuentras cadenas de caracteres extraños o texto ininteligible derivado de un mal reconocimiento OCR en el documento, IGNÓRALO por completo. No extraigas citas con basura OCR ni comentes nunca sobre la mala lectura del PDF. Simplemente haz de cuenta que ese texto basura no existe.
+    Si hallas un error genuino y legible, extrae la cita EXACTA enmarcada OBLIGATORIAMENTE en el comando LaTeX \\enquote{{...}}. ESTÁ ESTRICTAMENTE PROHIBIDO usar comillas dobles ("") o simples ('').
+    Retorna JSON: [{{\"error_description\": \"...\", \"exact_quote\": \"\\enquote{{...}}\"}}].
     Texto:\n{chunk_text}
     """
     async with sema:
-        for m in active_models:
-            try:
-                res = await client.aio.models.generate_content(model=m, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
-                return json.loads(res.text) if res.text else []
-            except Exception:
-                continue
-    return []
+        from google.genai import types
+        parsed, err = await resilient_gemini_call(client, active_models, prompt, config=types.GenerateContentConfig(response_mime_type="application/json"), is_json=True)
+        if parsed: return parsed
+        return []
 
 async def reduce_phase_async(client, rubric_title, rubric_content, map_results, rigor, max_errores, thesis_rules, active_models, sema):
-    from google.genai import types
+    import json
     evidences = json.dumps(map_results)
-    
     prompt = rf"""
     Eres Evaluador de Tesis rigor {rigor}. Dimensión: {rubric_title}
     CRITERIOS LATEX ORIGINAL:
@@ -155,6 +205,8 @@ async def reduce_phase_async(client, rubric_title, rubric_content, map_results, 
     1. Identifica hasta {max_errores} observaciones basándote estrictamente en evidencias. CERO FABRICACIÓN.
     2. MANDATO INQUEBRANTABLE (ANTIBIBLATEX): Escribe las referencias bibliográficas y las citas parentéticas en "texto plano". PROHIBIDO INYECTAR COMANDOS LATEX BIBTEX como \cite{{}}, \textcite{{}}, \parencite{{}}. Hazlo literamente así: (Autor, Año). Si usas \cite{{...}} te auto-destruirás y dañarás el reporte.
     3. MANDATO OBLIGATORIO (ANTISOCIAL): Jamás cites ni listes metodología social, ni utilices postulados de Hernández Sampieri o afines en español. Si el tesista citó a Sampieri para justificar Ingeniería Civil, destrúyelo críticamente en el reporte como un error inaceptable de alcance metodológico.
+    4. REGLA DE OCR (ERROR DE ORIGEN): Descarta automáticamente cualquier fragmento de evidencia que contenga caracteres extraños, símbolos ininteligibles o fallos originados por un mal OCR en la tesis original. No utilices ese texto ni comentes acerca de la mala calidad del OCR del PDF. IGNORA dicho texto.
+    5. REGLA DE ENTRECOMILLADO: Cuando cites texto literal de la tesis, de normativas o necesites resaltar algún término, está ESTRICTAMENTE PROHIBIDO usar NINGÚN TIPO de comillas tipográficas, sean simples o dobles (' ', " ", ‘ ’, “ ”). DEBES EMPLEAR EXCLUSIVAMENTE el comando LaTeX \\enquote{{texto}}. Ejemplo: Fallo en el \\enquote{{control del pronóstico}}. El incumplimiento destrozará el motor LaTeX.
     
     Formato JSON Obligatorio:
     {{
@@ -164,37 +216,23 @@ async def reduce_phase_async(client, rubric_title, rubric_content, map_results, 
       "puntaje": 0
     }}
     """
-    errores_detallados = []
     async with sema:
-        for m in active_models:
-            try:
-                res = await client.aio.models.generate_content(model=m, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
-                parsed = json.loads(res.text)
-                if isinstance(parsed, list) and len(parsed) > 0: return parsed[0]
-                if isinstance(parsed, dict): return parsed
-            except Exception as e:
-                errores_detallados.append(f"({m}): {str(e)}")
-                continue
-                
-    error_msg = " | ".join(errores_detallados)
-    return {"observaciones_narrativas": [rf"Fallo crítico interno en el motor de consolidación al procesar esta rúbrica. Historial Exacto de Intentos Fallidos: \textbf{{{error_msg}}}"], "referencias_apa": [], "puntaje": 0}
-
-async def re_evaluate_rubric_async(client, chunks, rubric, rubric_content, rigor, max_obs, thesis_rules, active_models, sema):
-    map_tasks = []
-    for idx, c in enumerate(chunks):
-        map_tasks.append(asyncio.create_task(map_phase_async(client, c, rubric, rubric_content, rigor, active_models, sema)))
-    await asyncio.gather(*map_tasks)
-    
-    all_cands = []
-    for t in map_tasks:
-        if t.result(): all_cands.extend(t.result())
-        
-    reduce_task = asyncio.create_task(reduce_phase_async(client, rubric, rubric_content, all_cands, rigor, max_obs, thesis_rules, active_models, sema))
-    await reduce_task
-    return reduce_task.result()
+        from google.genai import types
+        parsed, err = await resilient_gemini_call(client, active_models, prompt, config=types.GenerateContentConfig(response_mime_type="application/json"), is_json=True)
+        if parsed:
+            if isinstance(parsed, list) and len(parsed) > 0: return parsed[0]
+            if isinstance(parsed, dict): return parsed
+            
+    error_msg = str(err).replace('\n', ' | ') if err else "Timeout API o parseo fallido."
+    return {
+        "observaciones_narrativas": [rf"Fallo crítico interno en el motor de consolidación al procesar esta rúbrica. Historial Exacto de Intentos Fallidos: \textbf{{{error_msg}}}"], 
+        "referencias_apa": [], 
+        "puntaje": 0
+    }
 
 async def supervisor_agent_async(client, chunks, rubricas_db, inf_list, rigor, max_obs, thesis_rules, active_models, sema, logs):
     logs("Activando Agente Supervisor de Resiliencia...")
+    import asyncio
     max_intentos = 4
     for intento in range(max_intentos):
         fallos_encontrados = []
@@ -217,13 +255,96 @@ async def supervisor_agent_async(client, chunks, rubricas_db, inf_list, rigor, m
                 re_evaluate_rubric_async(client, chunks, rubrica, rubricas_db[rubrica], rigor, max_obs, thesis_rules, active_models, sema)
             )
         
-        await asyncio.gather(*reparaciones.values())
-        for i, task in reparaciones.items():
-            inf_list[i]['resultado'] = task.result()
+        if reparaciones:
+            await asyncio.gather(*reparaciones.values())
+            for i, task in reparaciones.items():
+                inf_list[i]['resultado'] = task.result()
             
     return inf_list
 
+async def re_evaluate_rubric_async(client, chunks, rubric, rubric_content, rigor, max_obs, thesis_rules, active_models, sema):
+    import asyncio
+    map_tasks = []
+    for idx, c in enumerate(chunks):
+        map_tasks.append(asyncio.create_task(map_phase_async(client, c, rubric, rubric_content, rigor, active_models, sema)))
+    await asyncio.gather(*map_tasks)
+    
+    all_cands = []
+    for t in map_tasks:
+        if t.result(): all_cands.extend(t.result())
+        
+    reduce_task = asyncio.create_task(reduce_phase_async(client, rubric, rubric_content, all_cands, rigor, max_obs, thesis_rules, active_models, sema))
+    await reduce_task
+    return reduce_task.result()
+
+async def deduplicate_phase_async(client, informe_final, active_models, sema):
+    return informe_final
+
+async def semantic_deduplicate_references_async(client, refs, active_models, logs):
+    import json
+    if not refs: return []
+    logs("Activando Agente Deduplicador Bibliográfico Global...")
+    prompt = f"""
+    Eres un bibliotecario algorítmico. Lista de referencias APA crudas:
+    {json.dumps(refs, ensure_ascii=False)}
+    
+    Misión: Deduplica las variaciones del mismo paper.
+    Retorna un JSON estricto con un único array final destilado de cadenas APA: ["Ref Mejorada 1", "Ref Mejorada 2"].
+    """
+    from google.genai import types
+    parsed, err = await resilient_gemini_call(client, active_models, prompt, config=types.GenerateContentConfig(response_mime_type="application/json"), is_json=True)
+    if parsed: return parsed
+    return sorted(list(set(refs)))
+
+async def url_is_valid_and_matches(ref, client, active_models):
+    import re
+    import aiohttp
+    from bs4 import BeautifulSoup
+    url_match = re.search(r"https?://[^\s]+", ref)
+    if not url_match: return ref
+    url = url_match.group(0).strip(").\"")
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            async with session.get(url, headers=headers, timeout=12) as response:
+                if response.status == 404: return None
+                if response.status != 200: return ref
+                html = await response.text()
+                
+        soup = BeautifulSoup(html, 'html.parser')
+        title = soup.title.string if soup.title else ""
+        text_preview = soup.get_text()[:300].replace('\n', ' ')
+        
+        prompt = f"Referencia: {ref}\nURL Título: {title}\nPreview Web: {text_preview}\n¿Corresponden semánticamente? Responde 'VALIDO' o 'FALSO'."
+        parsed, err = await resilient_gemini_call(client, active_models, prompt, is_json=False)
+        if parsed and "FALSO" in parsed.upper():
+            return None
+        return ref
+    except Exception:
+        return ref
+
+async def verify_bibliography_agent_async(client, informe_final, active_models, logs):
+    import copy
+    import asyncio
+    logs("Inquisidor: Verificando literatura en la Deep Web...")
+    informe = copy.deepcopy(informe_final)
+    verifications, mapping = [], []
+    for i, item in enumerate(informe):
+        for j, ref in enumerate(item.get('resultado', {}).get('referencias_apa', [])):
+            mapping.append((i, j))
+            verifications.append(url_is_valid_and_matches(ref, client, active_models))
+    if verifications:
+        r = await asyncio.gather(*verifications)
+        for (i, j), v in zip(mapping, r):
+            if v is None: informe[i]['resultado']['referencias_apa'][j] = None
+    for item in informe:
+        res = item.get('resultado', {})
+        if 'referencias_apa' in res:
+            res['referencias_apa'] = [r for r in res['referencias_apa'] if r is not None]
+    return informe
+
 async def generate_intro_agent_async(client, chunks, rubrics_list, inf_final, active_models, logs):
+    import json
     logs("Agente Analista Documental tejiendo Introducción Histórica...")
     context_inicio = "".join(chunks[:2])[:4000]
     resumen_eval = json.dumps([{"rubrica": x["rubrica"], "puntaje": x["resultado"].get("puntaje", 0)} for x in inf_final], ensure_ascii=False)
@@ -241,118 +362,29 @@ async def generate_intro_agent_async(client, chunks, rubrics_list, inf_final, ac
     Inmediatamente después, enlista brevemente los criterios evaluados y emite un preámbulo inicial advirtiendo la calidad general de la tesis basándote en los puntajes encontrados.
     Retorna EXCLUSIVAMENTE el texto crudo del párrafo, sin formateo markdown.
     """
-    for m in active_models:
-        try:
-            from google.genai import types
-            res = await client.aio.models.generate_content(model=m, contents=prompt)
-            return res.text.strip()
-        except Exception:
-            continue
-    return ""
+    parsed, err = await resilient_gemini_call(client, active_models, prompt, is_json=False)
+    if parsed: return parsed
+    return "La presente evaluación se ha aplicado a la tesis evaluada."
 
 async def generate_verdict_agent_async(client, inf_final, active_models, logs):
-    logs("Magistrado Supremo Universitario invocando Veredicto...")
-    data_resumen = []
-    for x in inf_final:
-        data_resumen.append({"rubrica": x["rubrica"], "observaciones": x["resultado"].get("observaciones_narrativas", [])})
-        
+    import json
+    logs("Magistrado IA redactando dictamen final...")
+    resumen_eval = json.dumps([{"rubrica": x["rubrica"], "puntaje": x["resultado"].get("puntaje", 0)} for x in inf_final], ensure_ascii=False)
+    
     prompt = f"""
-    Eres el Magistrado Supremo Universitario. Analiza la totalidad del dictamen generado:
-    {json.dumps(data_resumen, ensure_ascii=False)}
+    Eres el Magistrado de Evaluación de Tesis. 
+    Basándote estrictamente en este resumen de resultados:
+    {resumen_eval}
     
-    Escribe UN ÚNICO PÁRRAFO continuo y rotundo (de 6 a 8 líneas) realizando un sumario rápido de destrucción.
-    1. Menciona unificados los errores de fondo más severos y castigados del documento global.
-    2. Concluye catalogando textualmente el veredicto definitivo de la tesis en alguna de las siguientes jerarquías: Baja, Media Baja, Media Alta o Alta Calidad.
-    Retorna EXCLUSIVAMENTE el texto crudo del párrafo del Veredicto, sin listados de viñetas, sin markdown.
+    Debes emitir un dictamen y veredicto general continuo de un solo párrafo denso (aprox 10 a 16 líneas) de tipo narrativo que será insertado al final del documento LaTeX. Este párrafo debe contener el resumen analítico general de deficiencias graves, fortalezas notables, y una recomendación final de la calidad general.
+    NO USES COMANDOS. NO USES LISTAS. Solo devuelve el texto plano del párrafo.
     """
-    for m in active_models:
-        try:
-            from google.genai import types
-            res = await client.aio.models.generate_content(model=m, contents=prompt)
-            return res.text.strip()
-        except Exception:
-            continue
-    return ""
-
-async def deduplicate_phase_async(client, informe_final, active_models, sema):
-    from google.genai import types
-    prompt = f"Elimina semánticamente redundancias >= 80% criticando exactamente el mismo párrafo fundamental.\nJSON:{json.dumps(informe_final, ensure_ascii=False)}"
-    async with sema:
-        for m in active_models:
-            try:
-                res = await client.aio.models.generate_content(model=m, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
-                parsed = json.loads(res.text)
-                return parsed if isinstance(parsed, list) else informe_final
-            except Exception:
-                continue
-    return informe_final
-
-async def url_is_valid_and_matches(ref, client, active_models):
-    url_match = re.search(r'\\url\{([^}]+)\}', ref) or re.search(r'(https?://[^\s]+)', ref)
-    if not url_match: return ref
-    url = url_match.group(1)
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            async with session.get(url, headers=headers, timeout=12) as response:
-                if response.status == 404: return None
-                if response.status != 200: return ref
-                html = await response.text()
-                
-        soup = BeautifulSoup(html, 'html.parser')
-        title = soup.title.string if soup.title else ""
-        text_preview = soup.get_text()[:300].replace('\n', ' ')
-        
-        prompt = f"Referencia: {ref}\nURL Título: {title}\nPreview Web: {text_preview}\n¿Corresponden semánticamente? Responde 'VALIDO' o 'FALSO'."
-        for m in active_models:
-            try:
-                res = await client.aio.models.generate_content(model=m, contents=prompt)
-                return None if "FALSO" in res.text.upper() else ref
-            except Exception: continue
-        return ref
-    except Exception:
-        return ref
-
-async def semantic_deduplicate_references_async(client, refs, active_models, logs):
-    if not refs: return []
-    logs("Activando Agente Deduplicador Bibliográfico Global...")
-    prompt = f"""
-    Eres un bibliotecario algorítmico. Lista de referencias APA crudas:
-    {json.dumps(refs, ensure_ascii=False)}
-    
-    Misión: Deduplica las variaciones del mismo paper (e.g. si está la versión completa con DOI/Edition y otra incompleta, desecha la incompleta y mantén la completa). 
-    Retorna un JSON estricto con un único array final destilado de cadenas APA: ["Ref Mejorada 1", "Ref Mejorada 2"].
-    """
-    for m in active_models:
-        try:
-            from google.genai import types
-            res = await client.aio.models.generate_content(model=m, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
-            return json.loads(res.text)
-        except Exception:
-            continue
-    return sorted(list(set(refs)))
-
-async def verify_bibliography_agent_async(client, informe_final, active_models, logs):
-    logs("Inquisidor: Verificando literatura en la Deep Web...")
-    import copy
-    informe = copy.deepcopy(informe_final)
-    verifications, mapping = [], []
-    for i, item in enumerate(informe):
-        for j, ref in enumerate(item.get('resultado', {}).get('referencias_apa', [])):
-            mapping.append((i, j))
-            verifications.append(url_is_valid_and_matches(ref, client, active_models))
-    if verifications:
-        r = await asyncio.gather(*verifications)
-        for (i, j), v in zip(mapping, r):
-            if v is None: informe[i]['resultado']['referencias_apa'][j] = None
-    for item in informe:
-        res = item.get('resultado', {})
-        if 'referencias_apa' in res:
-            res['referencias_apa'] = [r for r in res['referencias_apa'] if r is not None]
-    return informe
+    parsed, err = await resilient_gemini_call(client, active_models, prompt, is_json=False)
+    if parsed: return parsed
+    return "Evaluación finalizada."
 
 async def procesar_tesis_async(client, chunks, rubrics, rubricas_db, rigor, max_obs, thesis_rules, active_models, logs):
+    import asyncio
     sema = asyncio.Semaphore(5)
     logs("Router Base activado...")
     router_map = await route_thesis_sections(client, chunks, rubrics, active_models)
@@ -421,21 +453,15 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
                 if 'gemini' in name_clean and 'vision' not in name_clean:
                     disponibles.append(name_clean)
                     
-        active_models_filtered = []
-        for pref in ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']:
-            if pref in disponibles:
-                active_models_filtered.append(pref)
-                
-        if not active_models_filtered and disponibles:
-            active_models_filtered.append(disponibles[0])
-            
-        if not active_models_filtered:
-            active_models_filtered = ['gemini-1.5-flash'] # hardcore fallback final
+        active_models_filtered = ['gemini-1.5-pro', 'gemini-1.5-flash'] # LTS Model Fallbacks
+        disponibles_limpios = [x for x in disponibles if x in active_models_filtered]
+        if disponibles_limpios:
+            active_models_filtered = disponibles_limpios
             
         daemon_log(f"Modelos confirmados que SI EXISTEN en tu entorno: {active_models_filtered}")
     except Exception as e:
         daemon_log(f"Falla en Explorador de Modelos. Forzando base. Trace: {e}")
-        active_models_filtered = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+        active_models_filtered = ['gemini-1.5-pro', 'gemini-1.5-flash']
     # -------------------------------------------------------------
     
     chunks = extract_chunks(file_bytes, chunk_size=15)
@@ -536,9 +562,7 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
             res = dict_resultados[rubric_title]
             puntaje = res.get('puntaje', 0)
             
-            # Update title to include puntaje
-            title_patt = r"\\section\{" + escaped_title + r"\}"
-            latex_content = re.sub(title_patt, rf"\\section{{{escape_user_data(rubric_title)} (Puntaje Asignado: {puntaje})}}", latex_content, count=1)
+            # Se omite reescribir y sobreescribir el título de la sección para no exponer el puntaje interno
             
             # Build and inject observaciones
             obs_str = ""
@@ -551,8 +575,9 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
             
             latex_content = latex_content.replace('{{OBSERVACIONES_AQUI}}', obs_str, 1)
 
-    # Agente Experto en Compilación LaTeX: Reemplazo Universal de Comillas Textuales
+    # Agente Experto en Compilación LaTeX: Reemplazo Universal de Comillas Textuales (Dobles y Simples)
     latex_content = re.sub(r'["“”]([^"“”]+)["“”]', r'\\enquote{\1}', latex_content)
+    latex_content = re.sub(r"['‘´`]([^'‘’´`\n]+?)['’´`]", r'\\enquote{\1}', latex_content)
 
     os.makedirs("reportes_temp", exist_ok=True)
     tex_path = os.path.join("reportes_temp", "informe_oficial.tex")
@@ -564,6 +589,8 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     if os.path.exists(pdf_path): os.remove(pdf_path)
 
     try:
+        subprocess.run(["pdflatex", "-interaction=nonstopmode", "-output-directory=reportes_temp", tex_path], check=False, capture_output=True)
+        # Segunda pasada exigida por LaTeX para incrustar el Índice General (.toc)
         subprocess.run(["pdflatex", "-interaction=nonstopmode", "-output-directory=reportes_temp", tex_path], check=False, capture_output=True)
     except Exception as e:
         daemon_log(f"PDFLaTeX Crash: {e}")
