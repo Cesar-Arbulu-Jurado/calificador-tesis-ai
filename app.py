@@ -453,10 +453,15 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
                 if 'gemini' in name_clean and 'vision' not in name_clean:
                     disponibles.append(name_clean)
                     
-        active_models_filtered = ['gemini-1.5-pro', 'gemini-1.5-flash'] # LTS Model Fallbacks
-        disponibles_limpios = [x for x in disponibles if x in active_models_filtered]
-        if disponibles_limpios:
-            active_models_filtered = disponibles_limpios
+        active_models_filtered = []
+        # Buscar nuestras preferencias en la lista devuelta por Google
+        for pref in ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-1.5-pro-latest', 'gemini-1.5-flash-latest', 'gemini-pro', 'gemini-2.5-flash']:
+            if pref in disponibles:
+                active_models_filtered.append(pref)
+                
+        # Si no hubo coincidencia exacta pero tienen modelos gemini, usar los suyos
+        if not active_models_filtered and disponibles:
+            active_models_filtered = disponibles[:3]
             
         daemon_log(f"Modelos confirmados que SI EXISTEN en tu entorno: {active_models_filtered}")
     except Exception as e:
