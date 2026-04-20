@@ -474,20 +474,42 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
+    def enviar_correo_emergencia(mensaje_error):
+        emisor = app_secrets.get("EMAIL_ADDRESS", "")
+        clave_app = app_secrets.get("EMAIL_PASSWORD", "")
+        if not emisor or not clave_app or not correo_destino: return
+        try:
+            msg = EmailMessage()
+            msg['Subject'] = '⚠️ Fallo Crítico en Evaluación de Tesis Automática'
+            msg['From'] = emisor
+            msg['To'] = correo_destino
+            msg.set_content(f"Estimado Usuario,\n\nTu evaluación de tesis (procesada de forma desatendida) NO ha podido finalizar tras múltiples horas debido a un error extremo en los servidores.\n\nDetalle Técnico: {mensaje_error}\n\nRecomendación: La tesis es demasiado extensa. Divide el PDF en mitades y envíalos individualmente.")
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(emisor, clave_app)
+                server.send_message(msg)
+            daemon_log("Correo de Emergencia DESPACHADO con éxito.")
+        except Exception as e2: daemon_log(f"Fallo enviando correo de emergencia: {e2}")
+
     try:
         informe_verificado, referencias_consolidadas, texto_intro, texto_veredicto = loop.run_until_complete(
             procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, rigor_val, max_obs, thesis_rules, active_models_filtered, daemon_log)
         )
     except Exception as e:
-        daemon_log(f"CRITICAL ASYNC ERROR: {e}")
+        daemon_log(f"CRITICAL ASYNC ERROR DETECTED: {e}")
+        enviar_correo_emergencia(str(e))
         loop.close()
         return
         
     loop.close()
     
+    import uuid
+    import shutil
+    uid = str(uuid.uuid4())[:8]
+    work_dir = f"reportes_temp_{uid}"
+    
     # Renderizado y email
     total_score = 0
-    daemon_log(f"Compilando documento en reportes_temp")
+    daemon_log(f"Compilando documento en {work_dir}")
     if not hasattr(informe_verificado, "__iter__"): informe_verificado = []
     
     for item in informe_verificado:
@@ -584,9 +606,9 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     latex_content = re.sub(r'["“”]([^"“”]+)["“”]', r'\\enquote{\1}', latex_content)
     latex_content = re.sub(r"['‘´`]([^'‘’´`\n]+?)['’´`]", r'\\enquote{\1}', latex_content)
 
-    os.makedirs("reportes_temp", exist_ok=True)
-    tex_path = os.path.join("reportes_temp", "informe_oficial.tex")
-    pdf_path = os.path.join("reportes_temp", "informe_oficial.pdf")
+    os.makedirs(work_dir, exist_ok=True)
+    tex_path = os.path.join(work_dir, "informe_oficial.tex")
+    pdf_path = os.path.join(work_dir, "informe_oficial.pdf")
 
     with open(tex_path, "w", encoding="utf-8") as f:
         f.write(latex_content)
@@ -594,9 +616,9 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     if os.path.exists(pdf_path): os.remove(pdf_path)
 
     try:
-        subprocess.run(["pdflatex", "-interaction=nonstopmode", "-output-directory=reportes_temp", tex_path], check=False, capture_output=True)
+        subprocess.run(["pdflatex", "-interaction=nonstopmode", "-output-directory=" + work_dir, tex_path], check=False, capture_output=True)
         # Segunda pasada exigida por LaTeX para incrustar el Índice General (.toc)
-        subprocess.run(["pdflatex", "-interaction=nonstopmode", "-output-directory=reportes_temp", tex_path], check=False, capture_output=True)
+        subprocess.run(["pdflatex", "-interaction=nonstopmode", "-output-directory=" + work_dir, tex_path], check=False, capture_output=True)
     except Exception as e:
         daemon_log(f"PDFLaTeX Crash: {e}")
 
@@ -637,6 +659,10 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
             except Exception as email_err_2:
                 daemon_log(f"SMTP Falló al enviar respaldo: {email_err_2}")
                 
+        try:
+            shutil.rmtree(work_dir)
+            daemon_log("Directorio temporal destruido.")
+        except Exception: pass
     daemon_log("-- PROCESO BACKGROUND DESTRUIDO y CERRADO SATISFACTORIAMENTE --")
 
 # Lógica del frontend desvinculada
