@@ -135,21 +135,28 @@ async def resilient_gemini_call(client, active_models, contents, config=None, is
 
     last_error = ""
     for m in active_models:
-        intentos = 3
+        intentos = 6
         for i in range(intentos):
             try:
-                res = await client.aio.models.generate_content(model=m, contents=contents, config=config)
-                if not res.text: raise Exception("Bloque vacío API")
+                res = await asyncio.wait_for(
+                    client.aio.models.generate_content(model=m, contents=contents, config=config),
+                    timeout=120.0
+                )
+                if getattr(res, "text", None) is None: raise Exception("Bloque vacío API")
                 
                 if is_json:
                     parsed = robust_json_parse(res.text)
                     return parsed, None
                 return res.text, None
                 
+            except asyncio.TimeoutError:
+                last_error = f"({m}): [TIMEOUT 120s] Modelo atascado en el socket de red."
+                await asyncio.sleep(10)
+                continue
             except Exception as e:
                 last_error = f"({m}): {str(e)}"
                 if "503" in str(e) or "429" in str(e) or "quota" in str(e).lower():
-                    await asyncio.sleep(5 * (i + 1))
+                    await asyncio.sleep(20 * (i + 1))
                     continue
                 else:
                     break # Failed syntax or 404, go next model
