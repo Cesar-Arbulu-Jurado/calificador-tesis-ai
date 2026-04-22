@@ -99,6 +99,21 @@ def extract_chunks(file_bytes, chunk_size=15):
     return chunks
 
 
+class QuotaCircuitBreaker:
+    def __init__(self):
+        self.consecutive_429 = 0
+        self.tripped = False
+        
+    def record_429(self):
+        self.consecutive_429 += 1
+        if self.consecutive_429 >= 15:
+            self.tripped = True
+            
+    def record_success(self):
+        self.consecutive_429 = 0
+
+GLOBAL_BREAKER = QuotaCircuitBreaker()
+
 async def resilient_gemini_call(client, active_models, contents, config=None, is_json=False):
     import json
     import re
@@ -133,6 +148,10 @@ async def resilient_gemini_call(client, active_models, contents, config=None, is
         except: pass
         raise Exception("JSON corrupto o incompleto devuelto de la API.")
 
+    global GLOBAL_BREAKER
+    if GLOBAL_BREAKER.tripped:
+        raise Exception("CORTOCIRCUITO GLOBAL: Límite diario de Tokens agotado. Múltiples agentes fallaron secuencialmente. Abortando análisis masivo de la tesis.")
+
     last_error = ""
     for m in active_models:
         intentos = 6
@@ -146,7 +165,9 @@ async def resilient_gemini_call(client, active_models, contents, config=None, is
                 
                 if is_json:
                     parsed = robust_json_parse(res.text)
+                    GLOBAL_BREAKER.record_success()
                     return parsed, None
+                GLOBAL_BREAKER.record_success()
                 return res.text, None
                 
             except asyncio.TimeoutError:
@@ -156,6 +177,9 @@ async def resilient_gemini_call(client, active_models, contents, config=None, is
             except Exception as e:
                 last_error = f"({m}): {str(e)}"
                 if "503" in str(e) or "429" in str(e) or "quota" in str(e).lower():
+                    GLOBAL_BREAKER.record_429()
+                    if GLOBAL_BREAKER.tripped:
+                        raise Exception("CORTOCIRCUITO GLOBAL: Límite de Tokens agotado de forma persistente. Abortando proceso masivo en seco.")
                     await asyncio.sleep(20 * (i + 1))
                     continue
                 else:
@@ -457,6 +481,9 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
     def daemon_log(msg): print(f"[DAEMON] {msg}")
     
     daemon_log("Iniciando Proceso Asíncrono Desatendido")
+    global GLOBAL_BREAKER
+    GLOBAL_BREAKER.record_success()
+    GLOBAL_BREAKER.tripped = False
     os.environ["GEMINI_API_KEY"] = api_key
     client = genai.Client(api_key=api_key)
     
@@ -502,7 +529,7 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
             msg['From'] = emisor
             msg['To'] = correo_destino
             msg.set_content(f"Estimado Usuario,\n\nTu evaluación de tesis (procesada de forma desatendida) NO ha podido finalizar tras múltiples horas debido a un error extremo en los servidores.\n\nDetalle Técnico: {mensaje_error}\n\nRecomendación: La tesis es demasiado extensa. Divide el PDF en mitades y envíalos individualmente.")
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
                 server.login(emisor, clave_app)
                 server.send_message(msg)
             daemon_log("Correo de Emergencia DESPACHADO con éxito.")
@@ -656,7 +683,7 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
                 msg['To'] = correo_destino
                 msg.set_content(f"Dictamen riguroso generado por IA, respaldado por {evaluator_name}.\n\nPuntaje Acumulado Autocalculado: {total_score}\n\n🤖 Operación Desatendida AI.")
                 msg.add_attachment(pdf_bytes, maintype='application', subtype='pdf', filename='Dictamen_Tesis_Oficial.pdf')
-                with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
                     server.login(emisor, clave_app)
                     server.send_message(msg)
                 daemon_log("Email ENVIADO exitosamente.")
@@ -673,7 +700,7 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
                     msg_tex['To'] = 'cesar.arbulu@cip.org.pe'
                     msg_tex.set_content(f"Copia de Respaldo Permanente de Evaluación de Tesis.\nEvaluador original declarado: {evaluator_name}\n\nAdjunto se encuentra el código fuente en formato puro de texto .TEX generado en la última iteración, listo para edición si fuese necesario.\n\n🤖 Sistema Autónomo de Calidad de Tesis.")
                     msg_tex.add_attachment(tex_bytes, maintype='text', subtype='plain', filename='Respado_Dictamen.tex')
-                    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
                         server.login(emisor, clave_app)
                         server.send_message(msg_tex)
                     daemon_log("Copia de Respaldo enviada exitosamente a cesar.arbulu@cip.org.pe")
