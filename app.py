@@ -303,20 +303,28 @@ async def semantic_deduplicate_references_async(client, refs, active_models, log
     if parsed: return parsed
     return sorted(list(set(refs)))
 
-async def url_is_valid_and_matches(ref, client, active_models):
-    import re
-    import aiohttp
-    from bs4 import BeautifulSoup
-    url_match = re.search(r"https?://[^\s]+", ref)
-    if not url_match: return ref
-    url = url_match.group(0).strip(").\"")
+async def url_is_valid_and_matches(ref, client, active_models, sema_http=None):
+    if sema_http: await sema_http.acquire()
     try:
+        import re
+        import aiohttp
+        from bs4 import BeautifulSoup
+        url_match = re.search(r"https?://[^\s]+", ref)
+        if not url_match: return ref
+        url = url_match.group(0).strip(").\"")
         async with aiohttp.ClientSession() as session:
             headers = {"User-Agent": "Mozilla/5.0"}
             async with session.get(url, headers=headers, timeout=12) as response:
                 if response.status == 404: return None
                 if response.status != 200: return ref
-                html = await response.text()
+                # PREVENCION OOM: Ignorar PDFs y leer max 500KB
+                content_type = response.headers.get('Content-Type', '').lower()
+                if 'application/pdf' in content_type or 'video' in content_type: return ref
+                try:
+                    chunk = await response.content.read(512 * 1024)
+                    html = chunk.decode('utf-8', errors='ignore')
+                except Exception:
+                    return ref
                 
         soup = BeautifulSoup(html, 'html.parser')
         title = soup.title.string if soup.title else ""
@@ -329,6 +337,8 @@ async def url_is_valid_and_matches(ref, client, active_models):
         return ref
     except Exception:
         return ref
+    finally:
+        if sema_http: sema_http.release()
 
 async def verify_bibliography_agent_async(client, informe_final, active_models, logs):
     import copy
@@ -336,10 +346,11 @@ async def verify_bibliography_agent_async(client, informe_final, active_models, 
     logs("Inquisidor: Verificando literatura en la Deep Web...")
     informe = copy.deepcopy(informe_final)
     verifications, mapping = [], []
+    sema_http = asyncio.Semaphore(10)
     for i, item in enumerate(informe):
         for j, ref in enumerate(item.get('resultado', {}).get('referencias_apa', [])):
             mapping.append((i, j))
-            verifications.append(url_is_valid_and_matches(ref, client, active_models))
+            verifications.append(url_is_valid_and_matches(ref, client, active_models, sema_http))
     if verifications:
         r = await asyncio.gather(*verifications)
         for (i, j), v in zip(mapping, r):
@@ -499,7 +510,10 @@ def background_process(file_bytes, selected_rubrics, rubricas_db, rigor_val, max
 
     try:
         informe_verificado, referencias_consolidadas, texto_intro, texto_veredicto = loop.run_until_complete(
-            procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, rigor_val, max_obs, thesis_rules, active_models_filtered, daemon_log)
+            asyncio.wait_for(
+                procesar_tesis_async(client, chunks, selected_rubrics, rubricas_db, rigor_val, max_obs, thesis_rules, active_models_filtered, daemon_log),
+                timeout=10800.0  # GLOBAL TIMEOUT 3 HOURS KILL SWITCH
+            )
         )
     except Exception as e:
         daemon_log(f"CRITICAL ASYNC ERROR DETECTED: {e}")
