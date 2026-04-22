@@ -120,30 +120,30 @@ async def resilient_gemini_call(client, active_models, contents, config=None, is
     import asyncio
     
     def robust_json_parse(text):
-        try:
-            return json.loads(text)
-        except Exception:
-            pass
-            
-        try:
-            # Try to strip markdown quotes
-            clean_text = text.strip()
-            if clean_text.startswith("```json"):
-                clean_text = clean_text[7:]
-            elif clean_text.startswith("```"):
-                clean_text = clean_text[3:]
-            if clean_text.endswith("```"):
-                clean_text = clean_text[:-3]
-            clean_text = clean_text.strip()
-            return json.loads(clean_text)
-        except: pass
+        import re
+        
+        # 1. Limpieza de bloques markdown
+        clean_text = text.strip()
+        if clean_text.startswith("```json"): clean_text = clean_text[7:]
+        elif clean_text.startswith("```"): clean_text = clean_text[3:]
+        if clean_text.endswith("```"): clean_text = clean_text[:-3]
+        clean_text = clean_text.strip()
+        
+        # 2. Auto-escape de macros LaTeX (corrige el error \enquote)
+        clean_text = re.sub(r'\\(?![\\"/bfnrtu])', r'\\\\', clean_text)
+        
+        # 3. Limpieza de trailing commas generadas por la IA
+        clean_text = re.sub(r',\s*([}\]])', r'\1', clean_text)
+        
+        try: return json.loads(clean_text)
+        except Exception: pass
         
         try:
-            match = re.search(r'\{.*\}', text, re.DOTALL)
+            match = re.search(r'\{.*\}', clean_text, re.DOTALL)
             if match: return json.loads(match.group(0))
         except: pass
         try:
-            match = re.search(r'\[.*\]', text, re.DOTALL)
+            match = re.search(r'\[.*\]', clean_text, re.DOTALL)
             if match: return json.loads(match.group(0))
         except: pass
         raise Exception("JSON corrupto o incompleto devuelto de la API.")
