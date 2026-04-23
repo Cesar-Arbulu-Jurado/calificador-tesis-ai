@@ -129,8 +129,8 @@ async def resilient_gemini_call(client, active_models, contents, config=None, is
         if clean_text.endswith("```"): clean_text = clean_text[:-3]
         clean_text = clean_text.strip()
         
-        # 2. Auto-escape de macros LaTeX (corrige el error \enquote)
-        clean_text = re.sub(r'\\(?![\\"/bfnrtu])', r'\\\\', clean_text)
+        # 2. Auto-escape de macros LaTeX (corrige el error \enquote y previene doble escape)
+        clean_text = re.sub(r'(?<!\\)\\(?![\\"/bfnrtu])', r'\\\\', clean_text)
         
         # 3. Limpieza de trailing commas generadas por la IA
         clean_text = re.sub(r',\s*([}\]])', r'\1', clean_text)
